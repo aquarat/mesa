@@ -48,7 +48,7 @@ hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
    assert(cs->current + AGX_CDM_BARRIER_LENGTH < cs->end &&
           "caller must ensure space");
 
-   cs->current = agx_cdm_barrier(cs->current, dev->dev.chip);
+   cs->current = agx_cdm_barrier_light(cs->current, dev->dev.chip);
    cs->stats.flushes++;
 }
 
