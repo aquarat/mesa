@@ -415,6 +415,23 @@ agx_cdm_barrier(GLOBAL uint32_t *out, enum agx_chip chip)
    return out;
 }
 
+/* Only the bits agx_cdm_barrier() set before the blit fixes added the rest. */
+static inline GLOBAL uint32_t *
+agx_cdm_barrier_light(GLOBAL uint32_t *out, enum agx_chip chip)
+{
+   agx_push(out, CDM_BARRIER, cfg) {
+      cfg.unk_5 = true;
+      cfg.unk_6 = true;
+      cfg.unk_8 = true;
+
+      if (chip == AGX_CHIP_G13X) {
+         cfg.unk_4 = true;
+      }
+   }
+
+   return out;
+}
+
 static inline GLOBAL uint32_t *
 agx_vdm_return(GLOBAL uint32_t *out)
 {
