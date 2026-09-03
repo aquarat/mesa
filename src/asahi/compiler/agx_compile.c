@@ -1599,7 +1599,31 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
    }
 
    case nir_intrinsic_begin_invocation_interlock: {
+      /* Wait for older overlapping fragments to have written out their
+       * results. wait_pix is modelled as a total barrier, so it orders the
+       * device memory accesses inside the critical section too. This is the
+       * same primitive used for tilebuffer dependencies, see
+       * agx_nir_lower_tilebuffer.c.
+       *
+       * Ensure the fragment participates in the tile's writeout bookkeeping,
+       * since that is what implicitly releases the pixel fence for younger
+       * fragments. Without this, a fragment shader that neither writes the
+       * tilebuffer nor writes memory could hold the fence forever.
+       */
+      b->shader->out->tag_write_disable = false;
       agx_wait_pixel_mask(b, 0xC);
+      return NULL;
+   }
+
+   case nir_intrinsic_end_invocation_interlock: {
+      /* AGX releases the pixel fence implicitly when the fragment thread
+       * finishes; there is no explicit release in any known code sequence
+       * (signal_pix exists in the ISA but is never emitted, including by the
+       * proprietary driver as far as we can tell). Conservatively extending
+       * the critical section to the end of the shader is legal, so this is a
+       * no-op. It also matches the pre-existing internal users of
+       * nir_begin_invocation_interlock, which have no matching end.
+       */
       return NULL;
    }
 
