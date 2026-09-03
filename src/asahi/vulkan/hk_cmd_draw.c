@@ -1665,9 +1665,19 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       hk_upload_usc_words(cmd, vs, gfx->linked[MESA_SHADER_VERTEX]), grid_vs,
       agx_workgroup(64, 1, 1), AGX_BARRIER_ALL);
 
+   /* The TCS grid is measured in threads (one per output control point), and we
+    * pack as many whole patches into a workgroup as fit in a subgroup. The
+    * hardware launches a partial final threadgroup, so a patch count that isn't
+    * a multiple of the packing factor (or a patch size that doesn't divide the
+    * subgroup) needs no special handling: every launched thread maps to a real
+    * patch and no thread is launched for a patch that doesn't exist.
+    */
    hk_dispatch_with_usc(
       dev, cs, &tcs->b.info, hk_upload_usc_words(cmd, tcs, tcs->only_linked),
-      grid_tcs, agx_workgroup(tcs->info.tess.tcs_output_patch_size, 1, 1),
+      grid_tcs,
+      agx_workgroup(poly_tcs_workgroup_size(
+                       tcs->info.tess.tcs_output_patch_size),
+                    1, 1),
       AGX_BARRIER_ALL);
 
    /* First generate counts, then prefix sum them, and then tessellate. */
