@@ -186,10 +186,15 @@ poly_heap_alloc_points(constant struct poly_tess_params *p, uint patch,
 {
    /* If we're recording statistics, increment now. The statistic is for
     * tessellation evaluation shader invocations, which is equal to the number
-    * of domain points generated.
+    * of domain points generated. Aggregate across the subgroup so we issue one
+    * atomic per subgroup rather than one per patch; the counter is a plain sum
+    * so this cannot change the result.
     */
    if (p->statistic) {
-      atomic_fetch_add((volatile atomic_uint *)(p->statistic), count);
+      uint sg_total = sub_group_non_uniform_reduce_add(count);
+
+      if (sub_group_elect())
+         atomic_fetch_add((volatile atomic_uint *)(p->statistic), sg_total);
    }
 
    uint32_t elsize_B = sizeof(struct poly_tess_point);

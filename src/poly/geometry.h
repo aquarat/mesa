@@ -116,13 +116,40 @@ static_assert(sizeof(struct poly_heap) == 4 * 4,
               "struct poly_heap must be 4 words");
 
 #ifdef __OPENCL_VERSION__
+/*
+ * Aggregate an allocation across the subgroup: one scan plus one atomic per
+ * subgroup instead of one atomic per lane hammering a single cache line. The
+ * hot caller is the tessellator, which allocates once per patch, and the
+ * geometry shader path shares the same allocator.
+ *
+ * The order in which lanes are handed their offsets within the aggregate is
+ * unspecified, which is fine: every caller records the offset it got back (the
+ * tessellator in coord_allocs[patch]) and nothing depends on the relative order
+ * of independent allocations. Ordering only matters for the index counts, and
+ * those go through the prefix sum, not through here.
+ *
+ * The non-uniform subgroup builtins are used deliberately: poly_heap_alloc*()
+ * is called from divergent control flow (patches take different paths through
+ * the tessellator), so these must be defined over the active lanes only.
+ */
 static inline uint
 poly_heap_alloc_offs(global struct poly_heap *heap, uint size_B)
 {
    size_B = align(size_B, 16);
 
-   uint offs =
-      atomic_fetch_add((volatile atomic_uint *)(&heap->bottom), size_B);
+   uint sg_offs = sub_group_non_uniform_scan_exclusive_add(size_B);
+   uint sg_total = sub_group_non_uniform_reduce_add(size_B);
+
+   uint sg_base = 0;
+   if (sub_group_elect()) {
+      sg_base =
+         atomic_fetch_add((volatile atomic_uint *)(&heap->bottom), sg_total);
+   }
+
+   /* Only the elected lane has a base, everyone else contributes zero, so a
+    * reduction broadcasts it to the subgroup.
+    */
+   uint offs = sub_group_non_uniform_reduce_add(sg_base) + sg_offs;
 
    /* Use printf+abort because assert is stripped from release builds. */
    if (heap->bottom >= heap->size) {
