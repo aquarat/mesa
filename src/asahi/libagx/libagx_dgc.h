@@ -415,6 +415,48 @@ agx_cdm_barrier(GLOBAL uint32_t *out, enum agx_chip chip)
    return out;
 }
 
+/* Lighter CDM barrier for the compute path (MR !44041), plus the one extra
+ * bit that turns out to be load-bearing on this hardware.
+ *
+ * !44041 keeps only unk_5, unk_6, unk_8 (and unk_4 on G13X) and drops the
+ * block of bits that was added blindly for blits.  On an M1 Max (G13C, which
+ * takes the AGX_CHIP_G13X path) that is not sufficient: dependent dispatch
+ * chains issued by the tessellation and geometry-shader emulation
+ * intermittently read stale data, which shows up as image mismatches in
+ * dEQP-VK.tessellation.*, dEQP-VK.geometry.* and the
+ * pipeline.push_constant.*_vert_tess_geom_frag cases.
+ *
+ * Bisecting the 16 dropped bits one at a time against a repeated dEQP run
+ * (1359 tess/geom cases x N) gives an unambiguous answer:
+ *
+ *   light (unk_4,5,6,8)          ~30 failures per 1359-case run
+ *   light + any one other bit    unchanged, EXCEPT:
+ *   light + unk_13               ~0.3 failures per run  (suppressed, not fixed)
+ *   light + unk_2                0 failures in 200+ runs
+ *
+ * Dropping any of unk_5/unk_6/unk_8 fails immediately, and so does dropping
+ * unk_4 on G13X (5/5 deterministic), so unk_2 is the minimal addition.
+ * Cost of unk_2 over the plain light barrier is ~2% of a dispatch; the
+ * barrier is still 24% (trivial) / 19% (4096-element add) cheaper than the
+ * full one.  We still do not know what any of these bits mean.
+ */
+static inline GLOBAL uint32_t *
+agx_cdm_barrier_light(GLOBAL uint32_t *out, enum agx_chip chip)
+{
+   agx_push(out, CDM_BARRIER, cfg) {
+      cfg.unk_2 = true;
+      cfg.unk_5 = true;
+      cfg.unk_6 = true;
+      cfg.unk_8 = true;
+
+      if (chip == AGX_CHIP_G13X) {
+         cfg.unk_4 = true;
+      }
+   }
+
+   return out;
+}
+
 static inline GLOBAL uint32_t *
 agx_vdm_return(GLOBAL uint32_t *out)
 {
