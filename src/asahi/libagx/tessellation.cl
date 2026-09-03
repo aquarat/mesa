@@ -85,13 +85,16 @@ libagx_tess_setup_indirect(
    grids[4] = 1;
    grids[5] = 1;
 
-   /* TCS grid size */
+   /* TCS grid size, in threads (one per output control point). */
    grids[6] = in_patches * p->output_patch_size;
    grids[7] = instance_count;
    grids[8] = 1;
 
-   /* TCS workgroup size */
-   grids[9] = p->output_patch_size;
+   /* TCS workgroup size. We pack as many whole patches as fit in a subgroup
+    * into each workgroup; the hardware launches a partial final threadgroup so
+    * the ragged tail needs no handling in the shader.
+    */
+   grids[9] = poly_tcs_workgroup_size(p->output_patch_size);
    grids[10] = 1;
    grids[11] = 1;
 

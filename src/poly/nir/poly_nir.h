@@ -52,8 +52,15 @@ bool poly_nir_lower_gs(struct nir_shader *gs, struct nir_shader **gs_count,
                        struct nir_shader **gs_copy, struct nir_shader **pre_gs,
                        struct poly_gs_info *info);
 
+/* Lower a TCS to a compute shader. patches_per_workgroup is the number of
+ * patches packed into each dispatched workgroup; the caller must dispatch with
+ * a workgroup size of patches_per_workgroup * tcs_vertices_out and a grid
+ * measured in threads. Pass 1 for the unpacked (one patch per workgroup)
+ * behaviour.
+ */
 bool poly_nir_lower_tcs(struct nir_shader *tcs,
-                        bool can_ignore_shader_out_barriers);
+                        bool can_ignore_shader_out_barriers,
+                        unsigned patches_per_workgroup);
 
 bool poly_nir_lower_tes(struct nir_shader *tes, bool to_hw_vs);
 

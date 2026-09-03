@@ -18,10 +18,24 @@ poly_tes_patch_vertices_in(constant struct poly_tess_params *p)
    return p->output_patch_size;
 }
 
+/*
+ * Map a TCS thread to the patch it processes. Each workgroup handles
+ * patches_per_wg consecutive patches of an instance; patch_in_wg selects one of
+ * them (it is local_invocation_id.x / output_patch_size, computed by the
+ * caller). wg_id.y is the instance.
+ */
 uint
-poly_tcs_unrolled_id(constant struct poly_tess_params *p, uint3 wg_id)
+poly_tcs_patch_id(uint3 wg_id, uint patch_in_wg, uint patches_per_wg)
 {
-   return (wg_id.y * p->patches_per_instance) + wg_id.x;
+   return (wg_id.x * patches_per_wg) + patch_in_wg;
+}
+
+uint
+poly_tcs_unrolled_id(constant struct poly_tess_params *p, uint3 wg_id,
+                     uint patch_in_wg, uint patches_per_wg)
+{
+   return (wg_id.y * p->patches_per_instance) +
+          poly_tcs_patch_id(wg_id, patch_in_wg, patches_per_wg);
 }
 
 /*

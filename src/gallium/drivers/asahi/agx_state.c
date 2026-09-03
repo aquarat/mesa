@@ -1552,7 +1552,8 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
          outputs = nir->info.outputs_written;
       }
    } else if (nir->info.stage == MESA_SHADER_TESS_CTRL) {
-      NIR_PASS(_, nir, poly_nir_lower_tcs, true);
+      /* TODO: pack multiple patches per workgroup here too */
+      NIR_PASS(_, nir, poly_nir_lower_tcs, true, 1);
    } else if (nir->info.stage == MESA_SHADER_GEOMETRY) {
       NIR_PASS(_, nir, poly_nir_lower_gs, &gs_count, &gs_copy, &pre_gs,
                &gs_info);
