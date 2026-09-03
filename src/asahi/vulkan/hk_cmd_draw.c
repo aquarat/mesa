@@ -1351,7 +1351,8 @@ hk_build_meta_shader_locked(struct hk_device *dev, struct hk_internal_key *key,
    hk_preprocess_nir_internal(dev->vk.physical, b.shader);
 
    struct hk_api_shader *s;
-   if (hk_compile_shader(dev, &info, NULL, NULL, NULL, &s) != VK_SUCCESS)
+   if (hk_compile_shader(dev, &info, NULL, NULL, TESS_PRIMITIVE_UNSPECIFIED,
+                         NULL, &s) != VK_SUCCESS)
       return NULL;
 
    /* ..and cache it before we return. The key is on the stack right now, so
@@ -1660,9 +1661,16 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       dev, cs, &tcs->b.info, hk_upload_usc_words(cmd, tcs, tcs->only_linked),
       grid_tcs, agx_workgroup(tcs->info.tess.tcs_output_patch_size, 1, 1));
 
-   /* First generate counts, then prefix sum them, and then tessellate. */
-   libagx_tessellate(cmd, grid_tess, AGX_BARRIER_ALL | AGX_PREGFX, info.mode,
-                     POLY_TESS_MODE_COUNT, state);
+   /* First generate counts, then prefix sum them, and then tessellate. The
+    * count pass is fused into the TCS epilogue when we knew the tessellation
+    * domain at TCS compile time, saving a dispatch and its cache flush.
+    */
+   if (tcs->info.tess.count_fused_mode != info.mode) {
+      perf_debug(cmd, "Unfused tessellation count pass");
+
+      libagx_tessellate(cmd, grid_tess, AGX_BARRIER_ALL | AGX_PREGFX, info.mode,
+                        POLY_TESS_MODE_COUNT, state);
+   }
 
    libagx_prefix_sum_tess(cmd, agx_1d(1024), AGX_BARRIER_ALL | AGX_PREGFX,
                           state, c_prims, c_inv, c_prims || c_inv);

@@ -44,6 +44,7 @@ static const struct debug_named_value hk_perf_options[] = {
    {"nobarrier", HK_PERF_NOBARRIER,"Ignore pipeline barriers"},
    {"batch",     HK_PERF_BATCH,    "Batch submissions"},
    {"norobust",  HK_PERF_NOROBUST, "Disable robustness"},
+   {"nofusetesscount", HK_PERF_NOFUSETESSCOUNT, "Do not fuse the tess COUNT pass into the TCS"},
    DEBUG_NAMED_VALUE_END
 };
 /* clang-format on */
@@ -421,7 +422,8 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       .robustness = &vk_robustness_disabled,
       .stage = MESA_SHADER_FRAGMENT,
    };
-   hk_compile_shader(dev, &info, NULL, NULL, pAllocator, &dev->null_fs);
+   hk_compile_shader(dev, &info, NULL, NULL, TESS_PRIMITIVE_UNSPECIFIED,
+                     pAllocator, &dev->null_fs);
    if (!dev->null_fs) {
       result = VK_ERROR_OUT_OF_HOST_MEMORY;
       goto fail_meta;

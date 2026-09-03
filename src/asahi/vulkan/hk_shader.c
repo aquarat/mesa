@@ -16,6 +16,7 @@
 #include "glsl_types.h"
 #include "hk_instance.h"
 #include "libagx.h"
+#include "poly/cl/libpoly.h"
 #include "nir.h"
 #include "nir_builder.h"
 
@@ -1062,6 +1063,63 @@ hk_lower_hw_vs(nir_shader *nir, struct hk_shader *shader, bool kill_psiz)
    NIR_PASS(_, nir, agx_nir_lower_uvs, &shader->info.uvs);
 }
 
+
+/*
+ * The tessellator's COUNT pass reads back the tessellation factors that the
+ * TCS just wrote and analytically computes the number of indices the patch
+ * will produce. A TCS workgroup is exactly one patch, so we can do that work
+ * in the TCS epilogue instead of in a dedicated dispatch, saving a dispatch
+ * and the maximal cache flush that follows it on every tessellated draw.
+ *
+ * This requires knowing the tessellation domain when compiling the TCS, which
+ * is declared by the tessellation evaluation shader. If we don't have it (e.g.
+ * unlinked shader objects), we fall back to the standalone COUNT dispatch.
+ */
+static void
+hk_nir_fuse_tess_count(nir_shader *tcs, enum tess_primitive_mode domain)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(tcs);
+   nir_builder b = nir_builder_at(nir_after_impl(impl));
+
+   /* Order the tess factor stores (lowered to global memory by
+    * poly_nir_lower_tcs) against the reads below. A patch fits in a subgroup,
+    * which is why poly_nir_lower_tcs is allowed to drop the shader output
+    * barriers entirely, so a subgroup execution scope suffices here too. The
+    * TCS is not compiled as a compute shader, so a threadgroup barrier is not
+    * even available.
+    */
+   nir_barrier(&b, .execution_scope = SCOPE_SUBGROUP,
+               .memory_scope = SCOPE_WORKGROUP,
+               .memory_semantics = NIR_MEMORY_ACQ_REL,
+               .memory_modes = nir_var_mem_global);
+
+   nir_def *params = nir_load_tess_param_buffer_poly(&b);
+   nir_def *patch =
+      poly_tcs_unrolled_id(&b, params, nir_load_workgroup_id(&b));
+
+   /* Elect a single invocation of the patch. */
+   nir_def *lane = nir_channel(&b, nir_load_local_invocation_id(&b), 0);
+   nir_push_if(&b, nir_ieq_imm(&b, lane, 0));
+   {
+      switch (domain) {
+      case TESS_PRIMITIVE_ISOLINES:
+         libagx_tess_count_isoline(&b, params, patch);
+         break;
+      case TESS_PRIMITIVE_TRIANGLES:
+         libagx_tess_count_tri(&b, params, patch);
+         break;
+      case TESS_PRIMITIVE_QUADS:
+         libagx_tess_count_quad(&b, params, patch);
+         break;
+      default:
+         UNREACHABLE("invalid tessellation domain");
+      }
+   }
+   nir_pop_if(&b, NULL);
+
+   nir_progress(true, impl, nir_metadata_none);
+}
+
 static VkResult
 hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
                nir_shader *nir, VkShaderCreateFlagsEXT shader_flags,
@@ -1290,6 +1348,7 @@ VkResult
 hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
                   const struct vk_graphics_pipeline_state *state,
                   const struct vk_features *vk_features,
+                  enum tess_primitive_mode tess_domain,
                   const VkAllocationCallbacks *pAllocator,
                   struct hk_api_shader **shader_out)
 {
@@ -1316,6 +1375,8 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
 
    mesa_shader_stage sw_stage = nir->info.stage;
 
+   enum tess_primitive_mode fused_domain = TESS_PRIMITIVE_UNSPECIFIED;
+
    union hk_key key_tmp, *key = NULL;
    if (sw_stage == MESA_SHADER_FRAGMENT) {
       hk_populate_fs_key(&key_tmp.fs, state);
@@ -1339,6 +1400,21 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
       key = &key_tmp;
    } else if (sw_stage == MESA_SHADER_TESS_CTRL) {
       NIR_PASS(_, nir, poly_nir_lower_tcs, true);
+
+      /* The domain may be declared by either tessellation stage. Prefer this
+       * shader's own declaration, falling back to the one we scraped off the
+       * tess eval shader compiled alongside us.
+       */
+      enum tess_primitive_mode domain = nir->info.tess._primitive_mode;
+      if (domain == TESS_PRIMITIVE_UNSPECIFIED)
+         domain = tess_domain;
+
+      if (domain != TESS_PRIMITIVE_UNSPECIFIED &&
+          !HK_PERF(dev, NOFUSETESSCOUNT)) {
+
+         hk_nir_fuse_tess_count(nir, domain);
+         fused_domain = domain;
+      }
    }
 
    /* Compile all variants up front */
@@ -1492,6 +1568,9 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
          hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
          return result;
       }
+
+      if (sw_stage == MESA_SHADER_TESS_CTRL)
+         shader->info.tess.count_fused_mode = fused_domain;
    }
 
    *shader_out = obj;
@@ -1568,9 +1647,23 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
    nir_opt_varyings_bulk(shaders, shader_count, true, UINT32_MAX, UINT32_MAX,
                          nir_opts, NULL);
 
+   /* The tessellation domain is declared by the tess eval shader, but the TCS
+    * needs it to fuse the tessellator's COUNT pass into its epilogue. This is
+    * only available when the stages are compiled together, which is always the
+    * case for pipelines (all pre-rasterization stages land in one partition)
+    * but not for individually created shader objects.
+    */
+   enum tess_primitive_mode tess_domain = TESS_PRIMITIVE_UNSPECIFIED;
+   for (uint32_t i = 0; i < shader_count; i++) {
+      if (infos[i].stage == MESA_SHADER_TESS_EVAL &&
+          infos[i].nir->info.tess._primitive_mode != TESS_PRIMITIVE_UNSPECIFIED)
+         tess_domain = infos[i].nir->info.tess._primitive_mode;
+   }
+
    for (uint32_t i = 0; i < shader_count; i++) {
       VkResult result =
-         hk_compile_shader(dev, &infos[i], state, features, pAllocator,
+         hk_compile_shader(dev, &infos[i], state, features, tess_domain,
+                           pAllocator,
                            (struct hk_api_shader **)&shaders_out[i]);
       if (result != VK_SUCCESS) {
          /* Clean up all the shaders before this point */

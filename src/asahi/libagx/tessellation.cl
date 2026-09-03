@@ -4,6 +4,7 @@
  */
 
 #include "poly/geometry.h"
+#include "poly/cl/tessellator.h"
 #include "poly/tessellator.h"
 
 KERNEL(1)
@@ -104,4 +105,34 @@ libagx_tess_setup_indirect(
    grids[15] = 64;
    grids[16] = 1;
    grids[17] = 1;
+}
+
+/*
+ * Tessellation index counting, fused into the tessellation control shader
+ * epilogue. The TCS workgroup is exactly one patch and has just written that
+ * patch's tessellation factors, so the COUNT pass of the tessellator can run
+ * right there instead of as its own dispatch (saving a dispatch and its cache
+ * flush per tessellated draw).
+ *
+ * These are deliberately thin wrappers with a compile-time constant mode, so
+ * that everything but the analytic index count is dead code eliminated. The
+ * domain is baked in at TCS compile time so only one of these is ever linked
+ * into a given shader.
+ */
+void
+libagx_tess_count_isoline(constant struct poly_tess_params *p, uint32_t patch)
+{
+   poly_tess_isoline_process(p, patch, POLY_TESS_MODE_COUNT);
+}
+
+void
+libagx_tess_count_tri(constant struct poly_tess_params *p, uint32_t patch)
+{
+   poly_tess_tri_process(p, patch, POLY_TESS_MODE_COUNT);
+}
+
+void
+libagx_tess_count_quad(constant struct poly_tess_params *p, uint32_t patch)
+{
+   poly_tess_quad_process(p, patch, POLY_TESS_MODE_COUNT);
 }

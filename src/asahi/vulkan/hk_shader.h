@@ -91,6 +91,14 @@ struct hk_shader_info {
          uint8_t tcs_nr_patch_outputs;
 
          struct hk_tess_info info;
+
+         /* TCS only: the tessellation domain whose COUNT pass has been fused
+          * into this shader's epilogue, or TESS_PRIMITIVE_UNSPECIFIED if the
+          * domain was not known at compile time and the COUNT pass must still
+          * be dispatched separately. Compared against the domain actually in
+          * use at draw time, so a mismatch can only ever cost a dispatch.
+          */
+         enum tess_primitive_mode count_fused_mode : 8;
       } tess;
 
       struct poly_gs_info gs;
@@ -354,6 +362,7 @@ VkResult hk_compile_shader(struct hk_device *dev,
                            struct vk_shader_compile_info *info,
                            const struct vk_graphics_pipeline_state *state,
                            const struct vk_features *features,
+                           enum tess_primitive_mode tess_domain,
                            const VkAllocationCallbacks *pAllocator,
                            struct hk_api_shader **shader_out);
 

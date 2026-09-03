@@ -81,6 +81,7 @@ hk_deps = [
   idep_vulkan_wsi_headers,
   idep_agx_pack,
   idep_libagx,
+  idep_libpoly,
   idep_libagx_shaders_h,
 ]
 

@@ -1412,17 +1412,28 @@ poly_tess_quad_process(constant struct poly_tess_params *p, uint32_t patch,
          int NumIndices = (OuterPoints * 3) + (12 * numRings * InnerPoints) -
                           (InnerPoints * 18) - (24 * numRings * (numRings - 1));
 
-         /* Determine major/minor axes */
+         /* Determine major/minor axes. Selected explicitly rather than by
+          * dynamically indexing the arrays: a dynamic index into a private
+          * array forces the whole thing into scratch, which is fatal when this
+          * count is inlined into a shader rather than compiled as a kernel.
+          */
          bool U_major =
             (numPointsForInsideTessFactor[U] > numPointsForInsideTessFactor[V]);
-         unsigned M = U_major ? U : V;
-         unsigned m = U_major ? V : U;
+
+         int insidePointsMajor = U_major ? numPointsForInsideTessFactor[U]
+                                         : numPointsForInsideTessFactor[V];
+         int insidePointsMinor = U_major ? numPointsForInsideTessFactor[V]
+                                         : numPointsForInsideTessFactor[U];
+         bool insideOddMajor =
+            U_major ? insideTessFactorOdd[U] : insideTessFactorOdd[V];
+         bool insideOddMinor =
+            U_major ? insideTessFactorOdd[V] : insideTessFactorOdd[U];
 
          /* Handle degenerate ring */
-         if (insideTessFactorOdd[m]) {
-            NumIndices += 12 * ((numPointsForInsideTessFactor[M] >> 1) -
-                                (numPointsForInsideTessFactor[m] >> 1));
-            NumIndices += (insideTessFactorOdd[M] ? 6 : 12);
+         if (insideOddMinor) {
+            NumIndices +=
+               12 * ((insidePointsMajor >> 1) - (insidePointsMinor >> 1));
+            NumIndices += (insideOddMajor ? 6 : 12);
          }
 
          // Generate the draw and allocate the index buffer with the size
