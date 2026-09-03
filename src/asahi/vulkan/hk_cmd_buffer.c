@@ -775,7 +775,7 @@ hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
 
    hk_dispatch_with_usc_launch(dev, cs, prog->b.launch,
                                agx_usc_addr(&dev->dev, t.gpu), grid,
-                               prog->b.workgroup);
+                               prog->b.workgroup, barrier);
 }
 
 void
