@@ -1520,7 +1520,7 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                                             vs->info.stage == MESA_SHADER_VERTEX
                                                ? gfx->linked[MESA_SHADER_VERTEX]
                                                : vs->only_linked),
-                        grid_vs, wg);
+                        grid_vs, wg, AGX_BARRIER_ALL);
 
    /* Transform feedback and various queries require extra dispatching,
     * determine if we need that here.
@@ -1539,7 +1539,8 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       /* If we need counts, launch the count shader and prefix sum the results. */
       if (count_words) {
          perf_debug(dev, "Geometry shader count");
-         hk_dispatch_with_local_size(cmd, cs, count, grid_gs, wg);
+         hk_dispatch_with_local_size(cmd, cs, count, grid_gs, wg,
+                                     AGX_BARRIER_ALL);
       }
 
       if (count->info.gs.prefix_sum) {
@@ -1551,11 +1552,11 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       /* Transform feedback / query program */
       perf_debug(dev, "Transform feedback / geometry query");
       hk_dispatch_with_local_size(cmd, cs, pre_gs, agx_1d(1),
-                                  agx_workgroup(1, 1, 1));
+                                  agx_workgroup(1, 1, 1), AGX_BARRIER_ALL);
    }
 
    /* Pre-rast geometry shader */
-   hk_dispatch_with_local_size(cmd, cs, main, grid_gs, wg);
+   hk_dispatch_with_local_size(cmd, cs, main, grid_gs, wg, AGX_BARRIER_ALL);
 
    if (poly_gs_indexed(count->info.gs.shape)) {
       enum agx_index_size index_size =
@@ -1585,7 +1586,8 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
 static struct agx_draw
 hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
-               struct agx_draw draw, uint64_t c_prims, uint64_t c_inv)
+               struct agx_draw draw, uint64_t c_prims, uint64_t c_inv,
+               bool consumer_follows)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct hk_graphics_state *gfx = &cmd->state.gfx;
@@ -1654,11 +1656,12 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    hk_dispatch_with_usc(
       dev, cs, &vs->b.info,
       hk_upload_usc_words(cmd, vs, gfx->linked[MESA_SHADER_VERTEX]), grid_vs,
-      agx_workgroup(64, 1, 1));
+      agx_workgroup(64, 1, 1), AGX_BARRIER_ALL);
 
    hk_dispatch_with_usc(
       dev, cs, &tcs->b.info, hk_upload_usc_words(cmd, tcs, tcs->only_linked),
-      grid_tcs, agx_workgroup(tcs->info.tess.tcs_output_patch_size, 1, 1));
+      grid_tcs, agx_workgroup(tcs->info.tess.tcs_output_patch_size, 1, 1),
+      AGX_BARRIER_ALL);
 
    /* First generate counts, then prefix sum them, and then tessellate. */
    libagx_tessellate(cmd, grid_tess, AGX_BARRIER_ALL | AGX_PREGFX, info.mode,
@@ -1667,7 +1670,21 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    libagx_prefix_sum_tess(cmd, agx_1d(1024), AGX_BARRIER_ALL | AGX_PREGFX,
                           state, c_prims, c_inv, c_prims || c_inv);
 
-   libagx_tessellate(cmd, grid_tess, AGX_BARRIER_ALL | AGX_PREGFX, info.mode,
+   /* Nothing later in this control stream reads what the tessellator just
+    * wrote unless a geometry shader (or another CDM consumer) follows in the
+    * same pre-graphics stream: the next draw's vertex shader is independent
+    * (its scratch buffers come from a disjoint CPU-side pool allocation, and
+    * the geometry heap is carved up by a device-coherent atomic bump), and the
+    * graphics work that consumes the tessellated index buffer lives in a
+    * separate control stream which the kernel already barriers against.
+    *
+    * So skip the flush when nothing follows. HK_PERFTEST=forcebarrier restores
+    * the old unconditional behaviour.
+    */
+   enum agx_barrier last_barrier =
+      consumer_follows ? AGX_BARRIER_ALL : AGX_BARRIER_NONE;
+
+   libagx_tessellate(cmd, grid_tess, last_barrier | AGX_PREGFX, info.mode,
                      POLY_TESS_MODE_WITH_COUNTS, state);
 
    return agx_draw_indexed_indirect(gfx->tess.out_draws, dev->heap->va->addr,
@@ -3570,7 +3587,7 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
 
       if (tess) {
          draw = hk_launch_tess(cmd, ccs, draw, geom ? 0 : stat_c_prims,
-                               geom ? 0 : stat_c_inv);
+                               geom ? 0 : stat_c_inv, geom);
       }
 
       if (geom) {
