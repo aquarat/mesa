@@ -89,7 +89,25 @@ agx_virtio_bo_alloc(struct agx_device *dev, size_t size, size_t align,
    req.blob_id = blob_id;
    req.vm_id = dev->vm_id;
 
-   handle = vdrm_bo_create(dev->vdrm, size, blob_flags, blob_id, 0, &req.hdr);
+   /* Every BO is created MAPPABLE, but agx_bo_map() is lazy and most BOs are
+    * never touched by the CPU at all.  Without a hint the virtio-gpu KMD
+    * establishes the host mapping inside RESOURCE_CREATE_BLOB
+    * (virtio_gpu_vram_map()), which is a blocking guest->host round trip and
+    * also burns host-visible address space for a mapping that may never be
+    * used.  Ask it to defer that until the first mmap() instead.
+    *
+    * The hint lives in a field appended to drm_virtgpu_resource_create_blob,
+    * so it is safe to pass unconditionally: DRM ioctls are looked up by
+    * command number rather than by size, drm_ioctl() sizes its bounce buffer
+    * to max(user, kernel) and only copies back what the caller asked for, and
+    * verify_blob() on older kernels never reads the field.  Kernels without
+    * commit 4c26e162947f ("drm/virtio: Extend blob UAPI with
+    * deferred-mapping hinting") therefore ignore it and keep mapping eagerly.
+    */
+   uint32_t blob_hints = DRM_VIRTGPU_BLOB_FLAG_HINT_DEFER_MAPPING;
+
+   handle = vdrm_bo_create(dev->vdrm, size, blob_flags, blob_id, blob_hints,
+                           &req.hdr);
    if (!handle) {
       fprintf(stderr, "vdrm_bo_created failed\n");
       return NULL;
