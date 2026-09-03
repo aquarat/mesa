@@ -538,6 +538,17 @@ poly_work_group_scan_inclusive_add(uint x, local uint *scratch)
    return (uint2)(prefix, reduction);
 }
 
+/*
+ * Sum x across the workgroup, returning the total to every invocation. Like
+ * poly_work_group_scan_inclusive_add, every invocation in the workgroup must
+ * call this (it contains barriers).
+ */
+static inline uint
+poly_work_group_reduce_add(uint x, local uint *scratch)
+{
+   return poly_work_group_scan_inclusive_add(x, scratch)[1];
+}
+
 static inline void
 poly_prefix_sum(local uint *scratch, global uint *buffer, uint len, uint words,
                 uint word, uint wg_count)

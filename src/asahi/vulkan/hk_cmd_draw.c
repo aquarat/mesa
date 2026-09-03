@@ -1297,7 +1297,7 @@ hk_upload_tess_params(struct hk_cmd_buffer *cmd, struct poly_tess_params *out,
       alloc += unrolled_patches * sizeof(uint32_t);
 
       uint32_t count_offs = alloc;
-      alloc += unrolled_patches * sizeof(uint32_t);
+      alloc += poly_tess_counts_size_B(unrolled_patches);
 
       /* Single API draw */
       uint32_t draw_offs = alloc;
@@ -1311,9 +1311,9 @@ hk_upload_tess_params(struct hk_cmd_buffer *cmd, struct poly_tess_params *out,
       args.out_draws = blob.gpu + draw_offs;
       args.counts = blob.gpu + count_offs;
    } else {
-      /* Allocate 3x indirect global+local grids for VS/TCS/tess */
+      /* Allocate 4x indirect global+local grids for VS/TCS/tess/prefix sum */
       uint32_t grid_stride = sizeof(uint32_t) * 6;
-      gfx->tess.grids = hk_pool_alloc(cmd, grid_stride * 3, 4).gpu;
+      gfx->tess.grids = hk_pool_alloc(cmd, grid_stride * 4, 4).gpu;
 
       args.out_draws = hk_pool_alloc(cmd, draw_stride_B, 4).gpu;
    }
@@ -1591,7 +1591,10 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct hk_graphics_state *gfx = &cmd->state.gfx;
-   struct agx_grid grid_vs, grid_tcs, grid_tess;
+   struct agx_grid grid_vs, grid_tcs, grid_tess, grid_scan;
+
+   /* Number of unrolled patches, or ~0 if only known on the GPU */
+   uint32_t nr_patches = ~0;
 
    struct hk_shader *vs = hk_bound_sw_vs(gfx);
    struct hk_shader *tcs = hk_only_variant(gfx->shaders[MESA_SHADER_TESS_CTRL]);
@@ -1634,12 +1637,16 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       grid_vs = agx_grid_indirect_local(gfx->tess.grids + 0 * grid_stride);
       grid_tcs = agx_grid_indirect_local(gfx->tess.grids + 1 * grid_stride);
       grid_tess = agx_grid_indirect_local(gfx->tess.grids + 2 * grid_stride);
+      grid_scan = agx_grid_indirect_local(gfx->tess.grids + 3 * grid_stride);
    } else {
       uint32_t patches = draw.b.count[0] / input_patch_size;
       grid_vs = grid_tcs = draw.b;
 
       grid_tcs.count[0] = patches * tcs->info.tess.tcs_output_patch_size;
       grid_tess = agx_1d(patches * draw.b.count[1]);
+
+      nr_patches = patches * draw.b.count[1];
+      grid_scan = agx_1d(poly_tess_scan_blocks(nr_patches) * POLY_TESS_SCAN_WG);
 
       /* TCS invocation counter increments once per-patch */
       if (hk_stat_enabled(tcs_stat)) {
@@ -1667,8 +1674,20 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    libagx_tessellate(cmd, grid_tess, AGX_BARRIER_ALL | AGX_PREGFX, info.mode,
                      POLY_TESS_MODE_COUNT, state);
 
-   libagx_prefix_sum_tess(cmd, agx_1d(1024), AGX_BARRIER_ALL | AGX_PREGFX,
-                          state, c_prims, c_inv, c_prims || c_inv);
+   /* For a handful of blocks the single workgroup kernel is faster than paying
+    * for a second dispatch, so only scan in parallel for big patch counts. For
+    * indirect draws we don't know the count on the CPU, so always go parallel.
+    */
+   if (nr_patches <= POLY_TESS_SCAN_PARALLEL_MIN) {
+      libagx_prefix_sum_tess(cmd, agx_1d(1024), AGX_BARRIER_ALL | AGX_PREGFX,
+                             state, c_prims, c_inv, c_prims || c_inv);
+   } else {
+      libagx_prefix_sum_tess_reduce(cmd, grid_scan,
+                                    AGX_BARRIER_ALL | AGX_PREGFX, state);
+
+      libagx_prefix_sum_tess_scan(cmd, grid_scan, AGX_BARRIER_ALL | AGX_PREGFX,
+                                  state, c_prims, c_inv, c_prims || c_inv);
+   }
 
    /* Nothing later in this control stream reads what the tessellator just
     * wrote unless a geometry shader (or another CDM consumer) follows in the
