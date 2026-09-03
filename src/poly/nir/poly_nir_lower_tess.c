@@ -5,6 +5,7 @@
 
 #include "poly/cl/libpoly.h"
 #include "poly/geometry.h"
+#include "poly/tessellator.h"
 #include "poly/nir/poly_nir.h"
 #include "util/bitscan.h"
 #include "util/macros.h"
@@ -15,11 +16,44 @@
 #include "nir_intrinsics_indices.h"
 #include "shader_enums.h"
 
+struct lower_tcs_state {
+   /* Whether barriers targeting only shader_out may be dropped entirely */
+   bool can_ignore_shader_out_barriers;
+
+   /* Number of patches packed into a single TCS workgroup. Must match the
+    * workgroup size the driver dispatches with, which is
+    * patches_per_workgroup * tcs_vertices_out.
+    */
+   unsigned patches_per_workgroup;
+};
+
+/*
+ * Index of the patch handled by this thread within its workgroup. With K
+ * patches packed per workgroup, thread t handles patch t / output_patch_size.
+ *
+ * There is deliberately no bounds check here: the grid is dispatched in threads
+ * (patches * output_patch_size), so the hardware launches a partial final
+ * threadgroup containing exactly the leftover patches. Every launched thread
+ * therefore belongs to a real patch, whether or not the patch count is a
+ * multiple of K and whether or not the patch size divides the subgroup size.
+ */
 static nir_def *
-tcs_unrolled_id(nir_builder *b)
+tcs_patch_in_workgroup(nir_builder *b, const struct lower_tcs_state *state)
 {
-   return poly_tcs_unrolled_id(b, nir_load_tess_param_buffer_poly(b),
-                               nir_load_workgroup_id(b));
+   if (state->patches_per_workgroup == 1)
+      return nir_imm_int(b, 0);
+
+   return nir_udiv_imm(b, nir_channel(b, nir_load_local_invocation_id(b), 0),
+                       b->shader->info.tess.tcs_vertices_out);
+}
+
+static nir_def *
+tcs_unrolled_id(nir_builder *b, const struct lower_tcs_state *state)
+{
+   return poly_tcs_unrolled_id(
+      b, nir_load_tess_param_buffer_poly(b), nir_load_workgroup_id(b),
+      tcs_patch_in_workgroup(b, state),
+      nir_imm_int(b, state->patches_per_workgroup));
 }
 
 uint64_t
@@ -39,13 +73,15 @@ poly_tcs_output_stride(const nir_shader *nir)
 }
 
 static nir_def *
-tcs_out_addr(nir_builder *b, nir_intrinsic_instr *intr, nir_def *vertex_id)
+tcs_out_addr(nir_builder *b, nir_intrinsic_instr *intr, nir_def *vertex_id,
+             const struct lower_tcs_state *state)
 {
    nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
 
    nir_def *offset = nir_get_io_offset_src(intr)->ssa;
    nir_def *addr = poly_tcs_out_address(
-      b, nir_load_tess_param_buffer_poly(b), tcs_unrolled_id(b), vertex_id,
+      b, nir_load_tess_param_buffer_poly(b), tcs_unrolled_id(b, state),
+      vertex_id,
       nir_iadd_imm(b, offset, sem.location),
       nir_imm_int(b, util_last_bit(b->shader->info.patch_outputs_written)),
       nir_imm_int(b, b->shader->info.tess.tcs_vertices_out),
@@ -80,10 +116,11 @@ lower_tes_load(nir_builder *b, nir_intrinsic_instr *intr)
 }
 
 static nir_def *
-tcs_load_input(nir_builder *b, nir_intrinsic_instr *intr)
+tcs_load_input(nir_builder *b, nir_intrinsic_instr *intr,
+               const struct lower_tcs_state *state)
 {
    nir_def *base = nir_imul(
-      b, tcs_unrolled_id(b),
+      b, tcs_unrolled_id(b, state),
       poly_tcs_patch_vertices_in(b, nir_load_tess_param_buffer_poly(b)));
    nir_def *vertex = nir_iadd(b, base, intr->src[0].ssa);
 
@@ -92,14 +129,20 @@ tcs_load_input(nir_builder *b, nir_intrinsic_instr *intr)
 
 static nir_def *
 lower_tcs_impl(nir_builder *b, nir_intrinsic_instr *intr,
-               bool can_ignore_shader_out_barriers)
+               const struct lower_tcs_state *state)
 {
+   bool can_ignore_shader_out_barriers = state->can_ignore_shader_out_barriers;
+
    switch (intr->intrinsic) {
    case nir_intrinsic_barrier: {
       /* We lowered the TCS outputs from shader_out to global memory,
        * preserve barriers if they don't target shader outputs or modify their
        * execution/memory scopes and modes accordingly to match subgroups since
-       * a patch fits in a subgroup. */
+       * a patch fits in a subgroup.
+       *
+       * When several patches are packed into one workgroup they all still fit
+       * in a single subgroup, so a subgroup barrier remains a superset of the
+       * per-patch barrier the shader asked for. */
       nir_variable_mode modes = nir_intrinsic_memory_modes(intr);
 
       /* Skip barriers that don't handle shader outputs */
@@ -132,19 +175,31 @@ lower_tcs_impl(nir_builder *b, nir_intrinsic_instr *intr,
    }
 
    case nir_intrinsic_load_primitive_id:
-      return nir_channel(b, nir_load_workgroup_id(b), 0);
+      return poly_tcs_patch_id(b, nir_load_workgroup_id(b),
+                               tcs_patch_in_workgroup(b, state),
+                               nir_imm_int(b, state->patches_per_workgroup));
 
    case nir_intrinsic_load_instance_id:
       return nir_channel(b, nir_load_workgroup_id(b), 1);
 
-   case nir_intrinsic_load_invocation_id:
-      if (b->shader->info.tess.tcs_vertices_out == 1)
+   case nir_intrinsic_load_invocation_id: {
+      unsigned patch_size = b->shader->info.tess.tcs_vertices_out;
+      if (patch_size == 1)
          return nir_imm_int(b, 0);
-      else
-         return nir_channel(b, nir_load_local_invocation_id(b), 0);
+
+      nir_def *local = nir_channel(b, nir_load_local_invocation_id(b), 0);
+      if (state->patches_per_workgroup == 1)
+         return local;
+
+      /* local % patch_size, reusing the division from tcs_patch_in_workgroup
+       * rather than emitting a second magic-number divide. */
+      return nir_isub(
+         b, local,
+         nir_imul_imm(b, tcs_patch_in_workgroup(b, state), patch_size));
+   }
 
    case nir_intrinsic_load_per_vertex_input:
-      return tcs_load_input(b, intr);
+      return tcs_load_input(b, intr, state);
 
    case nir_intrinsic_load_patch_vertices_in:
       return poly_tcs_patch_vertices_in(b, nir_load_tess_param_buffer_poly(b));
@@ -158,13 +213,13 @@ lower_tcs_impl(nir_builder *b, nir_intrinsic_instr *intr,
                                            nir_load_tess_param_buffer_poly(b));
 
    case nir_intrinsic_load_output: {
-      nir_def *addr = tcs_out_addr(b, intr, nir_undef(b, 1, 32));
+      nir_def *addr = tcs_out_addr(b, intr, nir_undef(b, 1, 32), state);
       return nir_load_global(b, intr->def.num_components, intr->def.bit_size,
                              addr, .align_mul = 4);
    }
 
    case nir_intrinsic_load_per_vertex_output: {
-      nir_def *addr = tcs_out_addr(b, intr, intr->src[0].ssa);
+      nir_def *addr = tcs_out_addr(b, intr, intr->src[0].ssa, state);
       return nir_load_global(b, intr->def.num_components, intr->def.bit_size,
                              addr, .align_mul = 4);
    }
@@ -176,14 +231,14 @@ lower_tcs_impl(nir_builder *b, nir_intrinsic_instr *intr,
                 VARYING_SLOT_TESS_LEVEL_INNER);
 
       nir_store_global(b, intr->src[0].ssa,
-                       tcs_out_addr(b, intr, nir_undef(b, 1, 32)),
+                       tcs_out_addr(b, intr, nir_undef(b, 1, 32), state),
                        .write_mask = nir_intrinsic_write_mask(intr));
       return NIR_LOWER_INSTR_PROGRESS_REPLACE;
    }
 
    case nir_intrinsic_store_per_vertex_output: {
       nir_store_global(b, intr->src[0].ssa,
-                       tcs_out_addr(b, intr, intr->src[1].ssa),
+                       tcs_out_addr(b, intr, intr->src[1].ssa, state),
                        .write_mask = nir_intrinsic_write_mask(intr));
       return NIR_LOWER_INSTR_PROGRESS_REPLACE;
    }
@@ -194,11 +249,13 @@ lower_tcs_impl(nir_builder *b, nir_intrinsic_instr *intr,
 }
 
 static bool
-lower_tcs(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+lower_tcs(nir_builder *b, nir_intrinsic_instr *intr, void *data_)
 {
+   const struct lower_tcs_state *data = data_;
+
    b->cursor = nir_before_instr(&intr->instr);
 
-   nir_def *repl = lower_tcs_impl(b, intr, !!(uintptr_t)data);
+   nir_def *repl = lower_tcs_impl(b, intr, data);
    if (!repl)
       return false;
 
@@ -210,11 +267,21 @@ lower_tcs(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 }
 
 bool
-poly_nir_lower_tcs(nir_shader *tcs, bool can_ignore_shader_out_barriers)
+poly_nir_lower_tcs(nir_shader *tcs, bool can_ignore_shader_out_barriers,
+                   unsigned patches_per_workgroup)
 {
-   return nir_shader_intrinsics_pass(
-      tcs, lower_tcs, nir_metadata_control_flow,
-      (void *)(uintptr_t)can_ignore_shader_out_barriers);
+   assert(patches_per_workgroup >= 1);
+   assert(patches_per_workgroup == 1 ||
+          patches_per_workgroup * tcs->info.tess.tcs_vertices_out <=
+             POLY_TCS_SUBGROUP_SIZE);
+
+   struct lower_tcs_state state = {
+      .can_ignore_shader_out_barriers = can_ignore_shader_out_barriers,
+      .patches_per_workgroup = patches_per_workgroup,
+   };
+
+   return nir_shader_intrinsics_pass(tcs, lower_tcs, nir_metadata_control_flow,
+                                     &state);
 }
 
 static nir_def *
