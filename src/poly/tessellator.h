@@ -21,6 +21,47 @@ enum poly_tess_mode {
    POLY_TESS_MODE_WITH_COUNTS,
 };
 
+/* Workgroup size of the two parallel tessellation prefix sum kernels. Fixed at
+ * 1024 because poly_work_group_scan_inclusive_add assumes a full 32 subgroups.
+ */
+#define POLY_TESS_SCAN_WG 1024
+
+/* Number of per-patch counts prefix summed by a single workgroup in the
+ * parallel (two pass) tessellation prefix sum. Must be <= POLY_TESS_SCAN_WG:
+ * one element per invocation, with the surplus invocations contributing zero.
+ * Lowering this is useful to force multi-block behaviour when testing.
+ */
+#define POLY_TESS_SCAN_BLOCK 1024
+
+/* Only worth scanning in parallel past this many patches. Below it the single
+ * workgroup kernel finishes in a handful of iterations and the extra dispatch
+ * (plus its cache flush) costs more than it saves. Measured on an M1 Max the
+ * crossover sits between 4 and 8 blocks.
+ */
+#define POLY_TESS_SCAN_PARALLEL_MIN (8 * POLY_TESS_SCAN_BLOCK)
+
+/* Number of workgroups (blocks) the parallel prefix sum uses for a given number
+ * of patches. Always at least 1: with zero patches we still need a single
+ * workgroup to allocate an empty index buffer and write the draw descriptor.
+ */
+static inline uint32_t
+poly_tess_scan_blocks(uint32_t nr_patches)
+{
+   uint32_t blocks =
+      (nr_patches + (POLY_TESS_SCAN_BLOCK - 1)) / POLY_TESS_SCAN_BLOCK;
+
+   return blocks == 0 ? 1 : blocks;
+}
+
+/* Scratch words appended after the counts array, holding one partial sum per
+ * block. Sized poly_tess_scan_blocks(nr_patches) words.
+ */
+static inline uint32_t
+poly_tess_counts_size_B(uint32_t nr_patches)
+{
+   return (nr_patches + poly_tess_scan_blocks(nr_patches)) * 4;
+}
+
 struct poly_tess_point {
    uint32_t u;
    uint32_t v;
