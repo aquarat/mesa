@@ -62,6 +62,39 @@ poly_tess_counts_size_B(uint32_t nr_patches)
    return (nr_patches + poly_tess_scan_blocks(nr_patches)) * 4;
 }
 
+/* The tessellation control shader is dispatched as a compute shader with one
+ * thread per output control point, so a workgroup would naturally be the output
+ * patch size. AGX runs 32 threads per subgroup, and the overwhelmingly common
+ * patch sizes are 3 and 4, so such a workgroup wastes almost the whole machine
+ * (and burns a threadgroup slot per patch).
+ *
+ * Instead we pack as many *whole* patches as fit into a single subgroup, so the
+ * packed workgroup is still at most one subgroup. That keeps the barriers
+ * correct: poly_nir_lower_tcs either drops a TCS barrier outright (relying on
+ * subgroup lockstep), demotes it to SCOPE_SUBGROUP, or leaves it at its
+ * original workgroup scope. In every case the resulting synchronisation is a
+ * superset of the per-patch barrier the shader asked for, since the patch is a
+ * subset of the packed workgroup which is a subset of the subgroup.
+ *
+ * Packing more than a subgroup's worth would be wrong, since then the implicit
+ * lockstep that replaces the dropped barriers no longer holds.
+ */
+#define POLY_TCS_SUBGROUP_SIZE (32)
+
+static inline uint32_t
+poly_tcs_patches_per_workgroup(uint32_t output_patch_size)
+{
+   if (output_patch_size == 0 || output_patch_size >= POLY_TCS_SUBGROUP_SIZE)
+      return 1;
+
+   return POLY_TCS_SUBGROUP_SIZE / output_patch_size;
+}
+
+static inline uint32_t
+poly_tcs_workgroup_size(uint32_t output_patch_size)
+{
+   return output_patch_size * poly_tcs_patches_per_workgroup(output_patch_size);}
+
 struct poly_tess_point {
    uint32_t u;
    uint32_t v;

@@ -1108,7 +1108,7 @@ kk_compile_shader(struct kk_device *dev, nir_shader *nir,
       NIR_PASS(_, nir, nir_lower_io_to_scalar,
                nir_var_shader_in | nir_var_shader_out, NULL, NULL);
 
-      NIR_PASS(_, nir, poly_nir_lower_tcs, false);
+      NIR_PASS(_, nir, poly_nir_lower_tcs, false, 1);
 
       shader->info.tess.info.ccw = nir->info.tess.ccw;
       shader->info.tess.info.points = nir->info.tess.point_mode;
