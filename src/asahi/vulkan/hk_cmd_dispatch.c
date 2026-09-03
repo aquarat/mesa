@@ -4,6 +4,7 @@
  * Copyright 2022-2023 Collabora Ltd. and Red Hat Inc.
  * SPDX-License-Identifier: MIT
  */
+#include <stdlib.h>
 #include "libagx/query.h"
 #include "vulkan/vulkan_core.h"
 #include "agx_helpers.h"
@@ -48,7 +49,24 @@ hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
    assert(cs->current + AGX_CDM_BARRIER_LENGTH < cs->end &&
           "caller must ensure space");
 
+   /* BENCH-ONLY (not upstream): emit the full agx_cdm_barrier() word, then
+    * AND bits 0..26 with $HK_CDM_AND so every bit-ablation can be measured
+    * from one build. Unset => byte-identical to upstream agx_cdm_barrier().
+    * Bits 27..31 (Returns + Block Type) are never touched. */
+   uint32_t *bench_bar = cs->current;
    cs->current = agx_cdm_barrier(cs->current, dev->dev.chip);
+   {
+      static int bench_init = 0;
+      static uint32_t bench_and = 0xFFFFFFFFu;
+      if (!bench_init) {
+         const char *e = getenv("HK_CDM_AND");
+         if (e)
+            bench_and = (uint32_t)strtoul(e, NULL, 0) | 0xF8000000u;
+         bench_init = 1;
+      }
+      if (bench_and != 0xFFFFFFFFu)
+         *bench_bar &= bench_and;
+   }
    cs->stats.flushes++;
 }
 
