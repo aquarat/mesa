@@ -2923,16 +2923,17 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
       NIR_PASS(progress, nir, nir_opt_dce);
    } while (progress);
 
-   progress = false;
-
-   /* If address lowering made progress, clean up before forming preambles.
-    * Otherwise the optimized preambles might just be constants! Do it before
-    * lowering int64 too, to avoid lowering constant int64 arithmetic.
+   /* Clean up before forming preambles. Otherwise the optimized preambles
+    * might just be constants! Do it before lowering int64 too, to avoid
+    * lowering constant int64 arithmetic.
+    *
+    * This used to be guarded on progress from agx_nir_lower_address, but that
+    * pass was moved earlier (and stopped reporting progress) in 0a81434adf4,
+    * leaving a stray "progress = false;" that made the guard permanently
+    * false and the block dead. Run it unconditionally.
     */
-   if (progress) {
-      NIR_PASS(_, nir, nir_opt_constant_folding);
-      NIR_PASS(_, nir, nir_opt_dce);
-   }
+   NIR_PASS(_, nir, nir_opt_constant_folding);
+   NIR_PASS(_, nir, nir_opt_dce);
 
    /* Only lower int64 after optimizing address arithmetic, so that u2u64/i2i64
     * conversions remain.
