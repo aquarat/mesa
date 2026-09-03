@@ -126,24 +126,16 @@ libagx_prefix_sum_geom(constant struct poly_geometry_params *p)
                    p->count_buffer_stride / 4, cl_group_id.x, 1024);
 }
 
-KERNEL(1024)
-libagx_prefix_sum_tess(global struct poly_tess_params *p, global uint *c_prims,
-                       global uint *c_invs, uint increment_stats__2)
+/*
+ * Once the total number of indices is known, allocate the index buffer and
+ * write out the API indexed draw. Must be called from exactly one invocation of
+ * the whole dispatch.
+ */
+static void
+libagx_tess_finish_prefix_sum(global struct poly_tess_params *p, uint total,
+                              global uint *c_prims, global uint *c_invs,
+                              uint increment_stats)
 {
-   local uint scratch[32];
-   poly_prefix_sum(scratch, p->counts, p->nr_patches, 1 /* words */,
-                   0 /* word */, 1024);
-
-   /* After prefix summing, we know the total # of indices, so allocate the
-    * index buffer now. Elect a thread for the allocation.
-    */
-   barrier(CLK_LOCAL_MEM_FENCE);
-   if (cl_local_id.x != 0)
-      return;
-
-   /* The last element of an inclusive prefix sum is the total sum */
-   uint total = p->nr_patches > 0 ? p->counts[p->nr_patches - 1] : 0;
-
    /* Allocate 4-byte indices */
    uint32_t elsize_B = sizeof(uint32_t);
    uint32_t size_B = total * elsize_B;
@@ -164,11 +156,107 @@ libagx_prefix_sum_tess(global struct poly_tess_params *p, global uint *c_prims,
     * info on the emulation. We just need to calculate the # of primitives
     * tessellated.
     */
-   if (increment_stats__2) {
+   if (increment_stats) {
       uint prims = p->points_mode ? total
                    : p->isolines  ? (total / 2)
                                   : (total / 3);
 
       poly_increment_counters(c_prims, c_invs, NULL, prims);
    }
+}
+
+KERNEL(1024)
+libagx_prefix_sum_tess(global struct poly_tess_params *p, global uint *c_prims,
+                       global uint *c_invs, uint increment_stats__2)
+{
+   local uint scratch[32];
+   poly_prefix_sum(scratch, p->counts, p->nr_patches, 1 /* words */,
+                   0 /* word */, 1024);
+
+   /* After prefix summing, we know the total # of indices, so allocate the
+    * index buffer now. Elect a thread for the allocation.
+    */
+   barrier(CLK_LOCAL_MEM_FENCE);
+   if (cl_local_id.x != 0)
+      return;
+
+   /* The last element of an inclusive prefix sum is the total sum */
+   uint total = p->nr_patches > 0 ? p->counts[p->nr_patches - 1] : 0;
+
+   libagx_tess_finish_prefix_sum(p, total, c_prims, c_invs,
+                                 increment_stats__2);
+}
+
+/*
+ * Parallel version of libagx_prefix_sum_tess, spread across many workgroups
+ * instead of looping in a single one. Two passes:
+ *
+ *  1. Reduce: each block of POLY_TESS_SCAN_BLOCK counts is summed to a single
+ *     partial, stashed in the scratch words that follow the counts array.
+ *
+ *  2. Scan: each block sums the partials of the blocks before it to get its
+ *     base, scans its own block, and writes base + scan.
+ *
+ * The result is the exact same ordered inclusive prefix sum the serial kernel
+ * produced - poly_draw() depends on counts[patch - 1] being the ordered
+ * exclusive prefix so that primitives are emitted in patch order.
+ */
+KERNEL(POLY_TESS_SCAN_WG)
+libagx_prefix_sum_tess_reduce(global struct poly_tess_params *p)
+{
+   local uint scratch[32];
+   uint tid = cl_local_id.x;
+   uint nr_patches = p->nr_patches;
+   uint i = (cl_group_id.x * POLY_TESS_SCAN_BLOCK) + tid;
+
+   bool live = (tid < POLY_TESS_SCAN_BLOCK) && (i < nr_patches);
+   uint sum = poly_work_group_reduce_add(live ? p->counts[i] : 0, scratch);
+
+   if (tid == 0)
+      p->counts[nr_patches + cl_group_id.x] = sum;
+}
+
+KERNEL(POLY_TESS_SCAN_WG)
+libagx_prefix_sum_tess_scan(global struct poly_tess_params *p,
+                            global uint *c_prims, global uint *c_invs,
+                            uint increment_stats__2)
+{
+   local uint scratch[32];
+   uint tid = cl_local_id.x;
+   uint block = cl_group_id.x;
+   uint nr_patches = p->nr_patches;
+   uint nr_blocks = poly_tess_scan_blocks(nr_patches);
+   global uint *partials = p->counts + nr_patches;
+
+   /* Sum the block partials, both for the blocks strictly before us (our base)
+    * and for all blocks (the grand total). nr_blocks is uniform so the loop
+    * trip count is uniform, which the barriers inside the reduction require.
+    */
+   uint pre = 0, all = 0;
+   for (uint off = 0; off < nr_blocks; off += POLY_TESS_SCAN_WG) {
+      uint b = off + tid;
+      uint value = (b < nr_blocks) ? partials[b] : 0;
+
+      all += value;
+      pre += (b < block) ? value : 0;
+   }
+
+   uint base = poly_work_group_reduce_add(pre, scratch);
+   uint total = poly_work_group_reduce_add(all, scratch);
+
+   /* Ordered inclusive scan of our own block, offset by the base */
+   uint i = (block * POLY_TESS_SCAN_BLOCK) + tid;
+   bool live = (tid < POLY_TESS_SCAN_BLOCK) && (i < nr_patches);
+   uint scan = poly_work_group_scan_inclusive_add(live ? p->counts[i] : 0,
+                                                  scratch)[0];
+
+   if (live)
+      p->counts[i] = base + scan;
+
+   /* Elect a single invocation of the whole dispatch for the allocation */
+   if (block != 0 || tid != 0)
+      return;
+
+   libagx_tess_finish_prefix_sum(p, total, c_prims, c_invs,
+                                 increment_stats__2);
 }
