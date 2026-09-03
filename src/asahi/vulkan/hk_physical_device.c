@@ -162,6 +162,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .EXT_extended_dynamic_state2 = true,
       .EXT_extended_dynamic_state3 = true,
       .EXT_external_memory_dma_buf = true,
+      .EXT_fragment_shader_interlock = true,
       .EXT_global_priority = true,
       .EXT_global_priority_query = true,
       .EXT_graphics_pipeline_library = true,
@@ -545,6 +546,23 @@ hk_get_device_features(
       .extendedDynamicState3CoverageReductionMode = false,
       .extendedDynamicState3RepresentativeFragmentTestEnable = false,
       .extendedDynamicState3ShadingRateImageEnable = false,
+
+      /* VK_EXT_fragment_shader_interlock
+       *
+       * The pixel fence orders overlapping fragments at sample granularity.
+       * With multisampling, the hardware shades per-sample and only
+       * synchronizes invocations that overlap in samples, so we cannot honour
+       * the stronger per-pixel guarantee: two fragments covering the same
+       * pixel but disjoint samples run concurrently. Pixel interlock is
+       * therefore not exposed (it would fail
+       * dEQP-VK.fragment_shader_interlock.basic.*.pixel_*.4xaa.*).
+       *
+       * Shading rate interlock needs VK_KHR_fragment_shading_rate, which we
+       * do not implement.
+       */
+      .fragmentShaderSampleInterlock = true,
+      .fragmentShaderPixelInterlock = false,
+      .fragmentShaderShadingRateInterlock = false,
 
       /* VK_EXT_graphics_pipeline_library */
       .graphicsPipelineLibrary = true,
