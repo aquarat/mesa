@@ -3058,9 +3058,10 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
     * can't deal with dead phis.
     */
    do {
+      progress = false;
+
       NIR_PASS(progress, nir, nir_opt_copy_prop);
       NIR_PASS(progress, nir, nir_opt_dce);
-      progress = false;
    } while (progress);
 }
 
