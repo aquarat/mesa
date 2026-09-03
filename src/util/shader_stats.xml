@@ -37,6 +37,11 @@
       <stat name="Spills">Number of spill (stack store) instructions</stat>
       <stat name="Fills">Number of fill (stack load) instructions</stat>
       <stat name="Preamble instructions" display="Preamble inst">Preamble instruction count</stat>
+      <stat name="Waits" display="waits">Number of wait instructions</stat>
+      <stat name="Async" display="async">Number of asynchronous (scoreboarded) instructions</stat>
+      <stat name="Drained" display="drained">Number of async messages drained by an explicit wait</stat>
+      <stat name="Waitdist" display="waitdist">Sum of instruction distances from each async op to the wait that drains it</stat>
+      <stat name="Eobwaits" display="eobwaits">Waits emitted by the end-of-block drain</stat>
     </isa>
 
    <family name="Pan">

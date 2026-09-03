@@ -2693,11 +2693,54 @@ agx_set_st_vary_final(agx_context *ctx)
    agx_no_varyings(&_b);
 }
 
+/*
+ * Measure wait behaviour: how many waits we emit, how many async messages each
+ * drains, and how far each async op is from the wait that drains it. This is
+ * pure instrumentation for shader-db.
+ */
+static void
+agx_calc_wait_stats(agx_context *ctx, struct agx2_stats *stats)
+{
+   agx_foreach_block(ctx, block) {
+      unsigned pending[2][8];
+      unsigned nr_pending[2] = {0, 0};
+      unsigned pos = 0;
+
+      agx_foreach_instr_in_block(block, I) {
+         if (I->op == AGX_OPCODE_WAIT) {
+            unsigned s = I->scoreboard & 1;
+            stats->waits++;
+
+            for (unsigned i = 0; i < nr_pending[s]; ++i) {
+               stats->drained++;
+               stats->waitdist += pos - pending[s][i] - 1;
+            }
+
+            nr_pending[s] = 0;
+         } else if (agx_opcodes_info[I->op].immediates &
+                    AGX_IMMEDIATE_SCOREBOARD) {
+            unsigned s = I->scoreboard & 1;
+            stats->async++;
+
+            if (nr_pending[s] < ARRAY_SIZE(pending[0]))
+               pending[s][nr_pending[s]++] = pos;
+         }
+
+         pos++;
+      }
+   }
+
+   stats->eobwaits += ctx->nr_eob_waits;
+}
+
 static void
 agx_calc_stats(agx_context *ctx, unsigned size, struct agx2_stats *stats)
 {
    struct agx_cycle_estimate cycles = agx_estimate_cycles(ctx);
    uint32_t old_preamble_inst = stats->preamble_inst;
+   uint32_t old_waits = stats->waits, old_async = stats->async;
+   uint32_t old_drained = stats->drained, old_waitdist = stats->waitdist;
+   uint32_t old_eobwaits = stats->eobwaits;
 
    *stats = (struct agx2_stats){
       .alu = cycles.alu,
@@ -2710,7 +2753,14 @@ agx_calc_stats(agx_context *ctx, unsigned size, struct agx2_stats *stats)
       .threads = agx_occupancy_for_register_count(ctx->max_reg).max_threads,
       .loops = ctx->loop_count,
       .preamble_inst = old_preamble_inst,
+      .waits = old_waits,
+      .async = old_async,
+      .drained = old_drained,
+      .waitdist = old_waitdist,
+      .eobwaits = old_eobwaits,
    };
+
+   agx_calc_wait_stats(ctx, stats);
 
    /* Count instructions */
    agx_foreach_instr_global(ctx, I) {
@@ -3491,6 +3541,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
       }
 
       ctx->out->stats.preamble_inst = instrs;
+      agx_calc_wait_stats(ctx, &ctx->out->stats);
    } else {
       agx_calc_stats(ctx, binary->size, &ctx->out->stats);
    }

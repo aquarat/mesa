@@ -546,6 +546,7 @@ typedef struct {
    /* Stats for shader-db */
    unsigned loop_count;
    unsigned max_reg;
+   unsigned nr_eob_waits;
 
    /* Promoted constants. These will be appended to the binary at the end. */
    uint16_t rodata[512];
