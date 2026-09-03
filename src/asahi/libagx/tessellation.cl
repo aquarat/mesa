@@ -37,7 +37,7 @@ libagx_tess_setup_indirect(
    alloc += unrolled_patches * 4;
 
    uint32_t count_offs = alloc;
-   alloc += unrolled_patches * sizeof(uint32_t);
+   alloc += poly_tess_counts_size_B(unrolled_patches);
 
    uint vb_offs = alloc;
    uint vb_size = poly_tcs_in_size(count * instance_count, vertex_outputs);
@@ -104,4 +104,14 @@ libagx_tess_setup_indirect(
    grids[15] = 64;
    grids[16] = 1;
    grids[17] = 1;
+
+   /* Prefix sum grid size: one workgroup per block of counts */
+   grids[18] = poly_tess_scan_blocks(unrolled_patches) * POLY_TESS_SCAN_WG;
+   grids[19] = 1;
+   grids[20] = 1;
+
+   /* Prefix sum workgroup size */
+   grids[21] = POLY_TESS_SCAN_WG;
+   grids[22] = 1;
+   grids[23] = 1;
 }
