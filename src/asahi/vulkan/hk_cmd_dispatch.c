@@ -56,7 +56,7 @@ void
 hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
                             struct agx_cdm_launch_word_0_packed launch,
                             uint32_t usc, struct agx_grid grid,
-                            struct agx_workgroup wg)
+                            struct agx_workgroup wg, enum agx_barrier barrier)
 {
    hk_ensure_cs_has_space(cs->cmd, cs, 0x2000 /* TODO */);
    cs->stats.cmds++;
@@ -64,13 +64,23 @@ hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
    cs->current =
       agx_cdm_launch(cs->current, dev->dev.chip, grid, wg, launch, usc);
 
-   hk_cdm_cache_flush(dev, cs);
+   /* The AGX_PREGFX/AGX_POSTGFX bits only select the target control stream, so
+    * mask them out: only AGX_BARRIER_ALL asks for cache maintenance. Callers
+    * that know the next dispatch in this control stream is independent pass
+    * AGX_BARRIER_NONE and we skip the (expensive, fully conservative) flush.
+    *
+    * HK_PERFTEST=forcebarrier restores the old unconditional behaviour so this
+    * can be A/B tested without a rebuild.
+    */
+   if ((barrier & AGX_BARRIER_ALL) || HK_PERF(dev, FORCEBARRIER))
+      hk_cdm_cache_flush(dev, cs);
 }
 
 void
 hk_dispatch_with_usc(struct hk_device *dev, struct hk_cs *cs,
                      struct agx_shader_info *info, uint32_t usc,
-                     struct agx_grid grid, struct agx_workgroup local_size)
+                     struct agx_grid grid, struct agx_workgroup local_size,
+                     enum agx_barrier barrier)
 {
    struct agx_cdm_launch_word_0_packed launch;
    agx_pack(&launch, CDM_LAUNCH_WORD_0, cfg) {
@@ -81,7 +91,7 @@ hk_dispatch_with_usc(struct hk_device *dev, struct hk_cs *cs,
       cfg.preshader_register_count = info->nr_preamble_gprs;
    }
 
-   hk_dispatch_with_usc_launch(dev, cs, launch, usc, grid, local_size);
+   hk_dispatch_with_usc_launch(dev, cs, launch, usc, grid, local_size, barrier);
 }
 
 static void
@@ -116,7 +126,7 @@ dispatch(struct hk_cmd_buffer *cmd, struct agx_grid grid)
       grid.count[2] *= local_size.z;
    }
 
-   hk_dispatch_with_local_size(cmd, cs, s, grid, local_size);
+   hk_dispatch_with_local_size(cmd, cs, s, grid, local_size, AGX_BARRIER_ALL);
    cs->stats.calls++;
 }
 
