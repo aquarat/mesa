@@ -829,20 +829,30 @@ void hk_usc_upload_spilled_rt_descs(struct agx_usc_builder *b,
 
 void hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs);
 
+/*
+ * Emit a compute dispatch. The barrier argument describes the dependency
+ * between this dispatch and whatever is emitted next into the same control
+ * stream: AGX_BARRIER_ALL emits a full (conservative) cache flush after the
+ * launch, AGX_BARRIER_NONE emits none. The AGX_PREGFX/AGX_POSTGFX bits are
+ * ignored here, they only pick the target control stream.
+ */
 void hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
                                  struct agx_cdm_launch_word_0_packed launch,
                                  uint32_t usc, struct agx_grid grid,
-                                 struct agx_workgroup local_size);
+                                 struct agx_workgroup local_size,
+                                 enum agx_barrier barrier);
 
 void hk_dispatch_with_usc(struct hk_device *dev, struct hk_cs *cs,
                           struct agx_shader_info *info, uint32_t usc,
                           struct agx_grid grid,
-                          struct agx_workgroup local_size);
+                          struct agx_workgroup local_size,
+                          enum agx_barrier barrier);
 
 static inline void
 hk_dispatch_with_local_size(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                             struct hk_shader *s, struct agx_grid grid,
-                            struct agx_workgroup local_size)
+                            struct agx_workgroup local_size,
+                            enum agx_barrier barrier)
 {
    if (agx_is_shader_empty(&s->b))
       return;
@@ -851,7 +861,7 @@ hk_dispatch_with_local_size(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    uint32_t usc = hk_upload_usc_words(cmd, s, s->only_linked);
 
    hk_reserve_scratch(cmd, cs, s);
-   hk_dispatch_with_usc(dev, cs, &s->b.info, usc, grid, local_size);
+   hk_dispatch_with_usc(dev, cs, &s->b.info, usc, grid, local_size, barrier);
 }
 
 void hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
