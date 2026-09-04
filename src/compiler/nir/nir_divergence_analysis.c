@@ -678,6 +678,22 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
                      (options & nir_divergence_uniform_load_tears);
       break;
 
+   /* load_agx is what agx_nir_lower_address rewrites load_global into, with
+    * sources (base address, offset). A load from an address every lane agrees
+    * on returns the same value in every lane, so it is divergent under exactly
+    * the same conditions as the load_global it came from.
+    *
+    * It used to be listed as unconditionally divergent below. Because
+    * agx_nir_lower_address runs two lines before nir_opt_uniform_subgroup
+    * (agx_compile.c), that made every SSBO load in every AGX shader divergent,
+    * and nir_opt_uniform_subgroup could never eliminate a read_first_invocation
+    * derived from one -- it bails on nir_src_is_divergent. In Ghost of Tsushima
+    * that left a broadcast pinning ~35 loop-invariant instructions, including
+    * two dependent SSBO loads, inside a hot loop. nir_opt_preamble, which uses
+    * its own source-recursive test, had already proved the same value uniform
+    * by hoisting it into the preamble.
+    */
+   case nir_intrinsic_load_agx:
    case nir_intrinsic_load_global:
    case nir_intrinsic_load_global_intel:
    case nir_intrinsic_load_global_2x32:
@@ -1120,7 +1136,6 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_active_subgroup_invocation_agx:
    case nir_intrinsic_load_sample_mask:
    case nir_intrinsic_quad_ballot_agx:
-   case nir_intrinsic_load_agx:
    case nir_intrinsic_load_shared_lock_nv:
    case nir_intrinsic_store_shared_unlock_nv:
    case nir_intrinsic_match_any_nv:
