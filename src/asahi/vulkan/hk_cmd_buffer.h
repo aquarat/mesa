@@ -358,6 +358,13 @@ struct hk_cs {
    /* Whether there is more than just the root chunk */
    bool stream_linked;
 
+   /* HK_PERF_OVERLAP defers the CDM cache flush instead of emitting one after
+    * every dispatch, so consecutive application dispatches can overlap. This
+    * records that a flush is owed before anything may consume those writes.
+    */
+   bool pending_flush;
+   uint32_t weak_run;   /* dispatches since the last full flush */
+
    /* Which shader's dispatches this control stream holds, for GPU-time
     * attribution. The firmware timestamps a whole control stream, so a stream
     * can only be charged to a shader if every dispatch in it came from that
@@ -691,6 +698,7 @@ hk_cs_destroy(struct hk_cs *cs)
 }
 
 void hk_dispatch_imm_writes(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
+void hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs);
 
 static void
 hk_cmd_buffer_end_compute_internal(struct hk_cmd_buffer *cmd,
@@ -698,6 +706,19 @@ hk_cmd_buffer_end_compute_internal(struct hk_cmd_buffer *cmd,
 {
    if (*ptr) {
       struct hk_cs *cs = *ptr;
+
+      /* HK_PERF_OVERLAP skips the per-dispatch CDM cache flush so that
+       * independent dispatches can run concurrently. The flush after the LAST
+       * dispatch is a different matter: it is what makes this stream's writes
+       * visible once the command completes, and deleting it corrupts anything
+       * that reads them. Deferring it here keeps the overlap inside the stream
+       * and the visibility at its boundary.
+       */
+      if (cs->pending_flush) {
+         hk_ensure_cs_has_space(cmd, cs, AGX_CDM_BARRIER_LENGTH);
+         hk_cdm_cache_flush(hk_cmd_buffer_device(cmd), cs);
+         cs->pending_flush = false;
+      }
 
       /* This control stream may write immediates as it ends. Queue the writes
        * now that we're done emitting everything else.

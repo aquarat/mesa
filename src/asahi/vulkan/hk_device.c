@@ -46,6 +46,7 @@ static const struct debug_named_value hk_perf_options[] = {
    {"norobust",     HK_PERF_NOROBUST,     "Disable robustness"},
    {"forcebarrier", HK_PERF_FORCEBARRIER, "Flush caches after every dispatch"},
    {"noflush",      HK_PERF_NOFLUSH,      "MEASUREMENT ONLY: skip ALL CDM cache flushes (renders incorrectly)"},
+   {"overlap",      HK_PERF_OVERLAP,      "Let independent vkCmdDispatch calls overlap (no flush between them)"},
    DEBUG_NAMED_VALUE_END
 };
 /* clang-format on */

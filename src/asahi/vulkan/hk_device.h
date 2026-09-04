@@ -103,6 +103,12 @@ struct hk_device {
    /* Firmware GPU timing, HK_GPUTIME=<seconds>. Off unless asked for. */
    struct hk_gputime gputime;
 
+   /* AGX_CDM_BARRIER_MASK, resolved once. See hk_cdm_barrier_masked(). */
+   uint32_t weak_barrier_mask;
+   bool weak_barrier_mask_valid;
+   uint32_t overlap_max;
+   bool overlap_max_valid;
+
    struct {
       struct u_rwlock lock;
       struct util_dynarray list;
@@ -120,6 +126,26 @@ enum hk_perftest {
    HK_PERF_NOROBUST = BITFIELD_BIT(4),
    HK_PERF_FORCEBARRIER = BITFIELD_BIT(5),
    HK_PERF_NOFLUSH = BITFIELD_BIT(6),
+
+   /* Let independent vkCmdDispatch calls overlap.
+    *
+    * dispatch() issues every application dispatch with AGX_BARRIER_ALL, which
+    * emits a full conservative CDM cache flush after it and so serialises
+    * consecutive dispatches. Vulkan does not require that: dispatches not
+    * separated by a barrier or event may execute concurrently, and
+    * hk_CmdPipelineBarrier2 already ends the control stream when the
+    * application does ask for ordering.
+    *
+    * It matters because this GPU needs roughly 4096 threads in flight to hide
+    * memory latency (measured: 428 ns for a dependent load in cache, 905 ns
+    * from DRAM, and a 7.4x throughput gain going from 64 to 4096 threads).
+    * Ghost of Tsushima's hot compute shader dispatches ~213 invocations at a
+    * time, 412 times a frame, so serialising them leaves the machine at about a
+    * fifth of its achievable throughput. Measured directly with identical work
+    * and no barriers between it: one dispatch of 64 groups takes 2.66 ms, the
+    * same work as 64 dispatches of 1 group takes 17.20 ms -- 6.5x.
+    */
+   HK_PERF_OVERLAP = BITFIELD_BIT(7),
 };
 
 #define HK_PERF(dev, flag) unlikely((dev)->perftest &HK_PERF_##flag)
