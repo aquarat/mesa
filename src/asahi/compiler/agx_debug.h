@@ -32,6 +32,16 @@ enum agx_compiler_dbg {
 
 uint64_t agx_get_compiler_debug(void);
 
+/*
+ * AGX_OCCUPANCY=<threads>: ask the register allocator for a register file small
+ * enough that this many threads fit, spilling to get there. 0 when unset.
+ *
+ * This changes generated code, so it must be mixed into shader cache keys --
+ * see hk_physical_device_compiler_flags(). Otherwise a sweep silently reuses
+ * binaries compiled at a different setting.
+ */
+unsigned agx_get_occupancy_target(void);
+
 #ifdef __cplusplus
 } /* extern C */
 #endif

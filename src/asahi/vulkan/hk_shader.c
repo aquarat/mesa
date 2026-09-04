@@ -101,7 +101,15 @@ uint64_t
 hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
 {
    /* This could be optimized but it doesn't matter */
-   return pdev->dev.debug;
+   uint64_t flags = pdev->dev.debug;
+
+   /* AGX_OCCUPANCY changes generated code, so it has to change the cache key
+    * too. Without this, sweeping the knob silently reuses binaries compiled at
+    * whatever setting happened to run first.
+    */
+   flags ^= (uint64_t)agx_get_occupancy_target() << 32;
+
+   return flags;
 }
 
 const nir_shader_compiler_options *

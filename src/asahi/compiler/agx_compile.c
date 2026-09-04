@@ -77,6 +77,24 @@ agx_get_compiler_debug(void)
    return debug_get_option_agx_compiler_debug();
 }
 
+unsigned
+agx_get_occupancy_target(void)
+{
+   const char *env = getenv("AGX_OCCUPANCY");
+   if (likely(env == NULL))
+      return 0;
+
+   int want = atoi(env);
+
+   /* Below the smallest tier the knob is meaningless; above the largest it
+    * saturates. Anything unparseable reads as 0, i.e. off.
+    */
+   if (want < 32)
+      return 0;
+
+   return MIN2((unsigned)want, 1024);
+}
+
 static agx_index
 agx_cached_preload(agx_context *ctx, unsigned base, enum agx_size size)
 {

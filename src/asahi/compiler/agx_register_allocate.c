@@ -1318,6 +1318,96 @@ lower_exports(agx_context *ctx)
    agx_emit_parallel_copies(&b, copies, nr);
 }
 
+/*
+ * Compute the smallest register file the program could possibly be assigned
+ * into, and the alignment that register file needs.
+ *
+ * This is a hard floor, not a heuristic. Spilling cannot get below it:
+ *
+ *  - PRELOAD writes a fixed hardware register, and agx_ra_assign_local()
+ *    coalesces it unconditionally (assign_regs() asserts reg < bound).
+ *  - EXPORT reads a fixed index, and lower_exports() raises ctx->max_reg to
+ *    cover it after RA has already finished.
+ *  - IMAGE_WRITE and big-gradient TEXTURE_SAMPLE need a contiguous register
+ *    window of a fixed size.
+ *  - The register file must be a whole multiple of the largest vector, or
+ *    live range splitting (find_best_region_to_evict) cannot subdivide it.
+ *
+ * Returns the floor; *alignment_out receives the required alignment. Both
+ * agree with reg_file_alignment as recomputed after spilling, since spilling
+ * only introduces moves of values that already exist.
+ */
+static unsigned
+agx_min_register_file(agx_context *ctx, unsigned *alignment_out)
+{
+   unsigned d = 24;
+   unsigned max_ncomps = 8;
+
+   agx_foreach_instr_global(ctx, I) {
+      if (I->op == AGX_OPCODE_PRELOAD) {
+         unsigned size = agx_size_align_16(I->src[0].size);
+         d = MAX2(d, I->src[0].value + size);
+      } else if (I->op == AGX_OPCODE_EXPORT) {
+         unsigned size = agx_size_align_16(I->src[0].size);
+         d = MAX2(d, I->imm + size);
+      } else if (I->op == AGX_OPCODE_IMAGE_WRITE) {
+         /* vec4 source + vec4 coordinates + bindless handle + reserved */
+         d = MAX2(d, 26);
+      } else if (I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
+                 (I->lod_mode == AGX_LOD_MODE_LOD_GRAD ||
+                  I->lod_mode == AGX_LOD_MODE_LOD_GRAD_MIN)) {
+         /* as above but with big gradient */
+         d = MAX2(d, 36);
+      }
+
+      agx_foreach_ssa_dest(I, v) {
+         max_ncomps = MAX2(max_ncomps, agx_index_size_16(I->dest[v]));
+      }
+   }
+
+   unsigned alignment = util_next_power_of_two(max_ncomps);
+
+   if (alignment_out)
+      *alignment_out = alignment;
+
+   return ALIGN_POT(d, alignment);
+}
+
+/*
+ * AGX_OCCUPANCY=<threads> asks for a register file small enough that the given
+ * number of threads fit, spilling to get there if necessary.
+ *
+ * Returns 0 when the knob is not in use, else the register bound to enforce.
+ * The bound is only ever lowered from what the caller already decided.
+ */
+static unsigned
+agx_occupancy_override(agx_context *ctx, unsigned max_possible_regs)
+{
+   unsigned want = agx_get_occupancy_target();
+   if (likely(want == 0))
+      return 0;
+
+   /* Only shaders that can spill can honour a bound below their demand. */
+   if (!ctx->key->has_scratch || ctx->key->is_helper)
+      return 0;
+
+   unsigned regs = agx_max_registers_for_occupancy(want);
+
+   /* Round the request DOWN to the register file alignment so we actually
+    * reach the requested tier, then clamp up to the hard floor: preloads,
+    * exports and fixed register windows are not spillable.
+    */
+   unsigned alignment;
+   unsigned floor = agx_min_register_file(ctx, &alignment);
+   unsigned target = MAX2(ROUND_DOWN_TO(regs, alignment), floor);
+
+   /* Never raise the bound: the workgroup size limit still applies. */
+   if (target >= max_possible_regs)
+      return 0;
+
+   return target;
+}
+
 void
 agx_ra(agx_context *ctx)
 {
@@ -1352,36 +1442,32 @@ agx_ra(agx_context *ctx)
       /* Even when testing spilling, we need enough room for preloaded/exported
        * regs.
        */
-      unsigned d = 24;
-      unsigned max_ncomps = 8;
-
-      agx_foreach_instr_global(ctx, I) {
-         if (I->op == AGX_OPCODE_PRELOAD) {
-            unsigned size = agx_size_align_16(I->src[0].size);
-            d = MAX2(d, I->src[0].value + size);
-         } else if (I->op == AGX_OPCODE_EXPORT) {
-            unsigned size = agx_size_align_16(I->src[0].size);
-            d = MAX2(d, I->imm + size);
-         } else if (I->op == AGX_OPCODE_IMAGE_WRITE) {
-            /* vec4 source + vec4 coordinates + bindless handle + reserved */
-            d = MAX2(d, 26);
-         } else if (I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
-                    (I->lod_mode == AGX_LOD_MODE_LOD_GRAD ||
-                     I->lod_mode == AGX_LOD_MODE_LOD_GRAD_MIN)) {
-            /* as above but with big gradient */
-            d = MAX2(d, 36);
-         }
-
-         agx_foreach_ssa_dest(I, v) {
-            max_ncomps = MAX2(max_ncomps, agx_index_size_16(I->dest[v]));
-         }
-      }
-
-      max_possible_regs = ALIGN_POT(d, util_next_power_of_two(max_ncomps));
+      max_possible_regs = agx_min_register_file(ctx, NULL);
    } else if (ctx->key->is_helper) {
       /* The helper program is unspillable and has a limited register file */
       max_possible_regs = 32;
    }
+
+   /* AGX_OCCUPANCY=<threads> caps the register file to whatever a given
+    * occupancy allows, trading spills for threads in flight.
+    *
+    * The default policy below rounds demand UP to the ceiling of the occupancy
+    * tier it already landed in, which minimises live range splitting but never
+    * tries to reach a HIGHER tier. Whether the extra threads hide more latency
+    * than the extra spill traffic costs is not something to reason about, so
+    * make it sweepable and measure it.
+    *
+    * This must be applied HERE -- before demand is computed -- not to max_regs
+    * further down. max_regs only bounds register assignment; it does not cause
+    * spilling, and agx_lower_spill() is only run when `spilling` is set. A
+    * bound below demand with no spilling makes find_regs_simple() fail, and
+    * find_best_region_to_evict() then returns ~0 (its "precondition: such a
+    * region exists" does not hold), which BITSET_SET_COUNT()s off the end of
+    * a stack bitset. That is the stack buffer overrun this knob used to hit.
+    */
+   unsigned occupancy_cap = agx_occupancy_override(ctx, max_possible_regs);
+   if (occupancy_cap)
+      max_possible_regs = occupancy_cap;
 
    /* Calculate the demand. We'll use it to determine if we need to spill and to
     * bound register assignment.
@@ -1405,8 +1491,11 @@ agx_ra(agx_context *ctx)
          unsigned l = agx_round_registers(
             align(agx_round_registers(effective_demand_remat + 6), 16));
 
-         /* Only rematerialize if it actually lets us save a wave */
-         if (l < agx_round_registers(effective_demand)) {
+         /* Only rematerialize if it actually lets us save a wave, and never let
+          * it raise the bound back above an occupancy request.
+          */
+         if (l < agx_round_registers(effective_demand) &&
+             (!occupancy_cap || l <= occupancy_cap)) {
             remat = true;
             max_possible_regs = l;
          }
@@ -1501,42 +1590,14 @@ agx_ra(agx_context *ctx)
    if (agx_compiler_debug & AGX_DBG_DEMAND)
       max_regs = ALIGN_POT(MAX2(demand, 12), reg_file_alignment);
 
-   /* AGX_OCCUPANCY=<threads> caps registers to whatever a given occupancy
-    * allows, trading spills for threads in flight.
-    *
-    * The policy above rounds demand UP to the ceiling of the occupancy tier it
-    * already landed in, which minimises live range splitting but never tries to
-    * reach a HIGHER tier. Measured on Ghost of Tsushima, the five shaders
-    * holding 68% of compute time all sit at 384 or 576 threads of a possible
-    * 1024, and the top two are at the 255-GPR ceiling spilling 272 times. Where
-    * that balance should sit is not something to reason about -- it depends on
-    * whether the extra threads hide more latency than the spill traffic adds --
-    * so make it sweepable and measure it.
+   /* Stop the tier rounding above handing back the registers the occupancy
+    * request just spilled away. The spiller's post-condition guarantees demand
+    * fits, so the MAX2 is only a belt-and-braces guard for the case where
+    * spilling was skipped entirely.
     */
-   {
-      const char *occ = getenv("AGX_OCCUPANCY");
-      if (unlikely(occ != NULL)) {
-         unsigned want = atoi(occ);
-         if (want >= 32) {
-            unsigned capped = agx_max_registers_for_occupancy(want);
-            capped = ROUND_DOWN_TO(capped, reg_file_alignment);
-
-            /* NEVER below `demand`. Capping under it asks the allocator to
-             * spill through a path that is not set up for it -- the
-             * force_spilling case above does extra work to guarantee room for
-             * preloaded and exported registers, which this does not. Doing so
-             * crashed vkCreateComputePipelines outright (0xc0000005, and a
-             * stack buffer overrun) on Ghost of Tsushima at AGX_OCCUPANCY=512.
-             *
-             * The consequence is that this knob can only give BACK registers
-             * the tier-rounding handed out, never force the extra spilling that
-             * a genuinely higher occupancy would need. Testing that trade
-             * properly requires spiller work, not an environment variable.
-             */
-            if (capped >= demand && capped >= (6 * 2))
-               max_regs = MIN2(max_regs, capped);
-         }
-      }
+   if (occupancy_cap) {
+      unsigned capped = ROUND_DOWN_TO(occupancy_cap, reg_file_alignment);
+      max_regs = MIN2(max_regs, MAX2(capped, demand));
    }
 
    /* ...but not too tightly */
