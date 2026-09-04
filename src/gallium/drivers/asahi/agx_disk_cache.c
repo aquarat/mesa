@@ -218,7 +218,12 @@ agx_disk_cache_init(struct agx_screen *screen)
    char timestamp[BLAKE3_HEX_LEN];
    _mesa_sha1_format(timestamp, id_sha1);
 
-   uint64_t driver_flags = screen->dev.debug;
+   /* AGX_OCCUPANCY changes generated code, so it has to change the cache key
+    * too. Otherwise a sweep silently reuses binaries compiled at a different
+    * setting. Mirrors hk_physical_device_compiler_flags().
+    */
+   uint64_t driver_flags =
+      screen->dev.debug ^ ((uint64_t)agx_get_occupancy_target() << 32);
    screen->disk_cache = disk_cache_create(renderer, timestamp, driver_flags);
 #endif
 }
