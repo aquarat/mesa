@@ -72,6 +72,14 @@ hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
     * HK_PERFTEST=forcebarrier restores the old unconditional behaviour so this
     * can be A/B tested without a rebuild.
     */
+   /* HK_PERFTEST=noflush skips every CDM cache flush. This is DELIBERATELY
+    * INCORRECT and will render wrong; its only purpose is to put a hard upper
+    * bound on what the per-dispatch barrier tax costs. Measured on Ghost of
+    * Tsushima: 966 dispatches and 971 flushes per frame at ~6 fps.
+    */
+   if (HK_PERF(dev, NOFLUSH))
+      return;
+
    if ((barrier & AGX_BARRIER_ALL) || HK_PERF(dev, FORCEBARRIER))
       hk_cdm_cache_flush(dev, cs);
 }
