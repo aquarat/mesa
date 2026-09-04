@@ -55,6 +55,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <vulkan/vulkan_core.h>
 #include "util/simple_mtx.h"
 #include "util/u_dynarray.h"
 
@@ -186,6 +187,22 @@ struct hk_gputime {
    uint64_t cdm_timestamped;
    uint64_t isolate_splits;   /* times the isolate path ended a stream */
 
+   /* vkCmdPipelineBarrier2 currently ends BOTH control streams outright
+    * ("the big hammer", hk_cmd_buffer.c). A stream end is not a cache
+    * operation, it is a full drain and a firmware round trip, and the game
+    * runs ~56 compute streams per frame against ~1750 dispatches -- so if the
+    * barriers driving those ends are compute-only, they could be served by an
+    * in-stream CDM barrier instead and the drain avoided.
+    *
+    * Whether that is worth doing depends entirely on how vkd3d-proton spells
+    * its barriers: D3D12 resource barriers can translate to ALL_COMMANDS,
+    * which no in-stream barrier can honour. So count them before changing
+    * anything.
+    */
+   uint64_t barriers;         /* vkCmdPipelineBarrier2 calls */
+   uint64_t barriers_compute; /* ...whose stages are all compute-servable */
+   uint64_t barriers_gfx_open; /* ...rejected only because gfx was open */
+
    /* Set when HK_GPUTIME_ISOLATE=1: end the compute control stream after every
     * dispatch, so each one is timed individually. This perturbs -- it turns ~56
     * control streams per frame into ~1780 -- but a stream costs about 2 us to
@@ -243,6 +260,11 @@ void hk_gputime_note_shader(struct hk_device *dev, enum hk_disp_kind kind,
 
 void hk_gputime_note_precomp(struct hk_device *dev, unsigned prog,
                              uint64_t threads, bool indirect);
+
+/* Classify one vkCmdPipelineBarrier2 for the report. `gfx_open` says whether a
+ * graphics control stream was in progress, which alone forces the hammer. */
+void hk_gputime_note_barrier(struct hk_device *dev, bool compute_only,
+                             bool gfx_open);
 
 /* Record which shader owns the command that reserved this block. */
 void hk_gputime_set_block_owner(struct hk_device *dev, int blk,
