@@ -334,6 +334,62 @@ hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
    return vk_command_buffer_get_record_result(&cmd->vk);
 }
 
+/*
+ * Can an in-stream CDM barrier serve this stage mask, or does honouring it
+ * require ending the control stream?
+ *
+ * A CDM barrier orders and flushes compute work within one compute control
+ * stream. It says nothing about the graphics pipeline, and it does not make
+ * memory visible to the host. So compute, transfer (which hk implements with
+ * compute kernels) and the two no-op ends of the pipe are servable; anything
+ * naming a graphics stage, the host, or ALL_COMMANDS is not.
+ */
+static bool
+hk_stage_servable_in_compute_stream(VkPipelineStageFlags2 s)
+{
+   const VkPipelineStageFlags2 ok =
+      VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT |
+      VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT |
+      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+      VK_PIPELINE_STAGE_2_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COPY_BIT |
+      VK_PIPELINE_STAGE_2_RESOLVE_BIT | VK_PIPELINE_STAGE_2_BLIT_BIT |
+      VK_PIPELINE_STAGE_2_CLEAR_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
+
+   /* An empty mask is a no-op dependency, not a licence to skip the drain. */
+   return s != 0 && (s & ~ok) == 0;
+}
+
+static bool
+hk_barrier_servable_in_compute_stream(const VkDependencyInfo *info)
+{
+   if (!info)
+      return false;
+
+   /* Image barriers can carry a layout transition. hk treats layouts as
+    * no-ops today, but that is a property of the image code rather than
+    * something this function can see, so decline them. */
+   if (info->imageMemoryBarrierCount)
+      return false;
+
+   /* A barrier that names no dependency at all still ends the stream. */
+   if (info->memoryBarrierCount + info->bufferMemoryBarrierCount == 0)
+      return false;
+
+   for (uint32_t i = 0; i < info->memoryBarrierCount; ++i) {
+      const VkMemoryBarrier2 *b = &info->pMemoryBarriers[i];
+      if (!hk_stage_servable_in_compute_stream(b->srcStageMask) ||
+          !hk_stage_servable_in_compute_stream(b->dstStageMask))
+         return false;
+   }
+   for (uint32_t i = 0; i < info->bufferMemoryBarrierCount; ++i) {
+      const VkBufferMemoryBarrier2 *b = &info->pBufferMemoryBarriers[i];
+      if (!hk_stage_servable_in_compute_stream(b->srcStageMask) ||
+          !hk_stage_servable_in_compute_stream(b->dstStageMask))
+         return false;
+   }
+   return true;
+}
+
 VKAPI_ATTR void VKAPI_CALL
 hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
                        const VkDependencyInfo *pDependencyInfo)
@@ -345,6 +401,33 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
       return;
 
    perf_debug(cmd, "Pipeline barrier");
+
+   bool compute_only = hk_barrier_servable_in_compute_stream(pDependencyInfo);
+   bool gfx_open = cmd->current_cs.gfx != NULL;
+
+   hk_gputime_note_barrier(dev, compute_only, gfx_open,
+                           cmd->current_cs.cs &&
+                              cmd->current_cs.cs->stats.cmds > 0);
+
+   /* A compute->compute dependency does not need the stream torn down; a full
+    * CDM barrier inside it orders the two sides just as well, and that is
+    * exactly what the driver emitted after EVERY dispatch before the overlap
+    * work. Ending the stream instead costs a full GPU drain and a firmware
+    * round trip, and the game does ~56 of them per frame.
+    *
+    * Off by default until measured on this workload: HK_PERFTEST=csbarrier.
+    */
+   if (HK_PERF(dev, CSBARRIER) && compute_only && !gfx_open) {
+      struct hk_cs *cs = cmd->current_cs.cs;
+
+      if (cs) {
+         hk_ensure_cs_has_space(cmd, cs, AGX_CDM_BARRIER_LENGTH);
+         hk_cdm_cache_flush(dev, cs);
+         cs->pending_flush = false;
+         cs->weak_run = 0;
+      }
+      return;
+   }
 
    /* The big hammer. We end both compute and graphics batches. Ending compute
     * here is necessary to properly handle graphics->compute dependencies.

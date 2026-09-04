@@ -48,6 +48,7 @@ static const struct debug_named_value hk_perf_options[] = {
    {"noflush",      HK_PERF_NOFLUSH,      "MEASUREMENT ONLY: skip ALL CDM cache flushes (renders incorrectly)"},
    {"overlap",      HK_PERF_OVERLAP,      "Let independent vkCmdDispatch calls overlap (default ON)"},
    {"nooverlap",    HK_PERF_NOOVERLAP,    "Disable dispatch overlap, restoring a full barrier after every dispatch"},
+   {"csbarrier",    HK_PERF_CSBARRIER,    "Serve compute-only pipeline barriers with an in-stream CDM barrier instead of ending the control stream"},
    DEBUG_NAMED_VALUE_END
 };
 /* clang-format on */
