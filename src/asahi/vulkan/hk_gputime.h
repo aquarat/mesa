@@ -202,6 +202,13 @@ struct hk_gputime {
    uint64_t barriers;         /* vkCmdPipelineBarrier2 calls */
    uint64_t barriers_compute; /* ...whose stages are all compute-servable */
    uint64_t barriers_gfx_open; /* ...rejected only because gfx was open */
+   /* Compute-only barriers that would actually save a drain: ones where a
+    * compute stream is open AND has work in it. A barrier that ends an empty
+    * stream costs nothing, so counting all compute-only barriers overstates
+    * the prize. This is the number of stream ends per frame that
+    * HK_PERFTEST=csbarrier can remove.
+    */
+   uint64_t barriers_avoidable;
 
    /* Set when HK_GPUTIME_ISOLATE=1: end the compute control stream after every
     * dispatch, so each one is timed individually. This perturbs -- it turns ~56
@@ -264,7 +271,7 @@ void hk_gputime_note_precomp(struct hk_device *dev, unsigned prog,
 /* Classify one vkCmdPipelineBarrier2 for the report. `gfx_open` says whether a
  * graphics control stream was in progress, which alone forces the hammer. */
 void hk_gputime_note_barrier(struct hk_device *dev, bool compute_only,
-                             bool gfx_open);
+                             bool gfx_open, bool ends_real_work);
 
 /* Record which shader owns the command that reserved this block. */
 void hk_gputime_set_block_owner(struct hk_device *dev, int blk,
