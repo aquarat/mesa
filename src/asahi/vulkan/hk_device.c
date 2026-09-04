@@ -46,7 +46,8 @@ static const struct debug_named_value hk_perf_options[] = {
    {"norobust",     HK_PERF_NOROBUST,     "Disable robustness"},
    {"forcebarrier", HK_PERF_FORCEBARRIER, "Flush caches after every dispatch"},
    {"noflush",      HK_PERF_NOFLUSH,      "MEASUREMENT ONLY: skip ALL CDM cache flushes (renders incorrectly)"},
-   {"overlap",      HK_PERF_OVERLAP,      "Let independent vkCmdDispatch calls overlap (no flush between them)"},
+   {"overlap",      HK_PERF_OVERLAP,      "Let independent vkCmdDispatch calls overlap (default ON)"},
+   {"nooverlap",    HK_PERF_NOOVERLAP,    "Disable dispatch overlap, restoring a full barrier after every dispatch"},
    DEBUG_NAMED_VALUE_END
 };
 /* clang-format on */
@@ -328,6 +329,28 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    }
 
    dev->perftest = debug_get_flags_option("HK_PERFTEST", hk_perf_options, 0);
+
+   /* Dispatch overlap is ON by default.
+    *
+    * This GPU needs roughly 4096 threads in flight to cover a dependent load
+    * (measured: 428 ns from a 16 KiB working set, 905 ns from 64 MiB, and a
+    * 7.4x throughput gain from 64 to 4096 threads). Applications that issue
+    * many small dispatches cannot reach that with one dispatch at a time, and a
+    * full CDM barrier after every launch stops them running concurrently.
+    * Ghost of Tsushima: 5.98 -> 12.43 fps, compute 135.9 -> 53.1 ms/frame.
+    *
+    * Correctness rests on Vulkan's own rule -- dispatches the application has
+    * not separated with a barrier are independent, and need no coherency
+    * between them. Anything that does need it still gets a full barrier:
+    * hk_CmdPipelineBarrier2 ends the control stream, and every driver-internal
+    * helper kernel and every indirect dispatch settles the deferred flush
+    * first. No regression across ~15300 CTS tests in memory_model,
+    * synchronization and compute.
+    *
+    * HK_PERFTEST=nooverlap restores the old behaviour.
+    */
+   if (!(dev->perftest & HK_PERF_NOOVERLAP))
+      dev->perftest |= HK_PERF_OVERLAP;
 
    if (dev->perftest) {
       fprintf(stderr, "[hk] HK_PERFTEST active: 0x%x (%s)\n", dev->perftest,

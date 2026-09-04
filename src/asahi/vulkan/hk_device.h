@@ -146,6 +146,9 @@ enum hk_perftest {
     * same work as 64 dispatches of 1 group takes 17.20 ms -- 6.5x.
     */
    HK_PERF_OVERLAP = BITFIELD_BIT(7),
+
+   /* Opt out of the above, which is on by default. */
+   HK_PERF_NOOVERLAP = BITFIELD_BIT(8),
 };
 
 #define HK_PERF(dev, flag) unlikely((dev)->perftest &HK_PERF_##flag)

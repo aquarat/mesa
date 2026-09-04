@@ -89,8 +89,19 @@ static uint32_t
 hk_weak_barrier_mask(struct hk_device *dev)
 {
    if (unlikely(!dev->weak_barrier_mask_valid)) {
+      /* 0x1f: bits 0-4, which include bit 3 (USC cache inval) and bit 4 --
+       * the descriptor/uniform state maintenance that must happen between ANY
+       * two dispatches. Leaving it out hangs the GPU. It deliberately excludes
+       * bit 7, the data-coherency bit, which is the one that serialises and is
+       * only required between DEPENDENT dispatches -- and those are separated
+       * by a barrier, which ends the control stream.
+       *
+       * Found by sweeping a single dependency pattern (got-bringup/
+       * tests/coherence.c) rather than by reasoning about the bits, whose
+       * meanings remain unknown.
+       */
       const char *e = getenv("AGX_CDM_BARRIER_MASK");
-      dev->weak_barrier_mask = e ? (uint32_t)strtoul(e, NULL, 0) : 0u;
+      dev->weak_barrier_mask = e ? (uint32_t)strtoul(e, NULL, 0) : 0x1fu;
       dev->weak_barrier_mask_valid = true;
    }
    return dev->weak_barrier_mask;
