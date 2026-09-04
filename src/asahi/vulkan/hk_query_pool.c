@@ -412,6 +412,31 @@ hk_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
          .handle = pool->handle,
          .offset_B = hk_query_offset(pool, query),
       };
+
+      /* The firmware writes this timestamp when the control stream it is
+       * attached to COMPLETES. Leaving that stream open means every dispatch
+       * recorded after this call joins it, and the timestamp then reports a
+       * time after that work rather than before it -- so
+       *
+       *    WriteTimestamp(A); Dispatch; Dispatch; WriteTimestamp(B)
+       *
+       * put the dispatches inside A's stream and gave B an empty one, and
+       * B - A came out as approximately zero no matter how much work was
+       * between them. Measured before this change: four 512 MiB fills took
+       * 11 ms of wall time and the queries reported 0.047 ms, a 240x
+       * underreport. That is not a small error in a measurement, it is the
+       * absence of one, and applications that size their workload from GPU
+       * frame time -- anything with dynamic resolution -- conclude they have
+       * unlimited headroom.
+       *
+       * Ending the stream here is what the comment above always claimed this
+       * function did. The cost is one extra hardware command per timestamp,
+       * which is what the "splitting compute control streams is inexpensive"
+       * note was already accepting.
+       */
+      if (!after_gfx) {
+         hk_cmd_buffer_end_compute(cmd);
+      }
    }
 
    /* From the Vulkan spec:
