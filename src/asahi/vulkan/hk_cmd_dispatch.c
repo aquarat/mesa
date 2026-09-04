@@ -58,7 +58,8 @@ hk_cmd_bind_compute_shader(struct hk_cmd_buffer *cmd,
  * So emit a real barrier block with a chosen subset of the cache bits.
  * AGX_CDM_BARRIER_MASK sweeps that subset so the minimal correct set can be
  * found by measurement rather than guessed. Bit 3 is USC cache invalidate, the
- * only one genxml names; 0-20 are the rest.
+ * only one genxml names; 0-20 are the rest. See hk_weak_barrier_mask() below
+ * for the measured per-bit cost and why the default is what it is.
  */
 static void
 hk_cdm_barrier_masked(struct hk_device *dev, struct hk_cs *cs, uint32_t mask)
@@ -89,19 +90,46 @@ static uint32_t
 hk_weak_barrier_mask(struct hk_device *dev)
 {
    if (unlikely(!dev->weak_barrier_mask_valid)) {
-      /* 0x1f: bits 0-4, which include bit 3 (USC cache inval) and bit 4 --
-       * the descriptor/uniform state maintenance that must happen between ANY
-       * two dispatches. Leaving it out hangs the GPU. It deliberately excludes
-       * bit 7, the data-coherency bit, which is the one that serialises and is
-       * only required between DEPENDENT dispatches -- and those are separated
-       * by a barrier, which ends the control stream.
+      /* 0x80 -- bit 7 alone.
        *
-       * Found by sweeping a single dependency pattern (got-bringup/
-       * tests/coherence.c) rather than by reasoning about the bits, whose
-       * meanings remain unknown.
+       * WHY THIS IS SAFE, rather than merely observed to work: two dispatches
+       * can only land in the same compute control stream if NOTHING separated
+       * them, because vkCmdPipelineBarrier2, vkCmdSetEvent2/WaitEvents2, every
+       * draw and every query operation all end the stream outright. Vulkan
+       * therefore guarantees that dispatches sharing a stream are independent,
+       * and independent dispatches need no coherency between them. The one
+       * exception is the driver's own dispatches -- geometry/tessellation
+       * emulation, decompression, libagx helper kernels -- which DO have real
+       * dependencies the application never expressed; every one of those still
+       * passes AGX_BARRIER_ALL and gets the full flush, and the deferred flush
+       * is settled before them (see hk_dispatch_with_usc_launch).
+       *
+       * WHY BIT 7. Per-bit cost, measured with 64 dependent-free dispatches of
+       * one workgroup each (got-bringup/tests/cstest.c, 64,1,100000):
+       *
+       *   no bits set                     2.89 ms   (full overlap)
+       *   bit 7                           2.89 ms   <- free
+       *   bits 17, 18, 19                 2.89 ms   free
+       *   bits 1, 2, 0                    4.2-7.4 ms
+       *   bits 4, 5, 6, 10-16             37.2 ms   serialised
+       *   bit 3                           48.5 ms   serialised
+       *   bits 8, 9                      183 ms
+       *   all 21 bits (the old default)  188 ms
+       *
+       * So bit 7 buys write visibility for nothing, which is worth keeping as
+       * insurance against an application relying on ordering it never asked
+       * for. Coherency proper needs bit 7 AND one of bits 3/5/6 (measured with
+       * tests/coherence.c); that pairing costs 37 ms and we do not need it
+       * here, for the reason above.
+       *
+       * NOTE, since an earlier revision of this comment asserted otherwise:
+       * bit 7 is NOT the bit that serialises, and bits 3/4 are NOT required to
+       * avoid a GPU hang. The hang that produced that belief came from the
+       * earlier attempts, which emitted no barrier block at all or failed to
+       * settle the deferred flush -- not from the mask.
        */
       const char *e = getenv("AGX_CDM_BARRIER_MASK");
-      dev->weak_barrier_mask = e ? (uint32_t)strtoul(e, NULL, 0) : 0x1fu;
+      dev->weak_barrier_mask = e ? (uint32_t)strtoul(e, NULL, 0) : 0x80u;
       dev->weak_barrier_mask_valid = true;
    }
    return dev->weak_barrier_mask;
