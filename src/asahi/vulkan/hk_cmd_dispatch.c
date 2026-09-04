@@ -139,6 +139,7 @@ hk_dispatch_with_usc(struct hk_device *dev, struct hk_cs *cs,
     */
    if (unlikely(dev->gputime.isolate) && cs->cmd &&
        cs == cs->cmd->current_cs.cs) {
+      p_atomic_inc(&dev->gputime.isolate_splits);
       hk_cmd_buffer_end_compute(cs->cmd);
    }
 }

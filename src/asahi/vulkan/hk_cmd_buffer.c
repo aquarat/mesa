@@ -307,7 +307,17 @@ hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
    hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.post_gfx);
 
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   if (likely(!(dev->dev.debug & AGX_DBG_NOMERGE))) {
+
+   /* HK_GPUTIME_ISOLATE splits the control stream after every dispatch so the
+    * firmware times each one individually. Merging here would put them straight
+    * back together and silently defeat it -- which it did: 1216 dispatches came
+    * out as 13 timed commands, so every interval covered about a hundred
+    * dispatches and per-shader attribution was meaningless. The profiler cannot
+    * protect itself with the timestamp check above, because it assigns its
+    * timestamps at submit, long after this runs.
+    */
+   if (likely(!(dev->dev.debug & AGX_DBG_NOMERGE)) &&
+       likely(!dev->gputime.isolate)) {
       merge_control_streams(cmd);
    }
 

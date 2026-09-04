@@ -184,6 +184,7 @@ struct hk_gputime {
     */
    uint64_t cdm_commands;
    uint64_t cdm_timestamped;
+   uint64_t isolate_splits;   /* times the isolate path ended a stream */
 
    /* Set when HK_GPUTIME_ISOLATE=1: end the compute control stream after every
     * dispatch, so each one is timed individually. This perturbs -- it turns ~56
