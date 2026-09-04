@@ -73,6 +73,21 @@ struct agx_bo;
 #define HK_GPUTIME_SLOT_COMP_END   5
 #define HK_GPUTIME_SLOTS_PER_BLOCK 8
 
+/*
+ * Where a compute dispatch came from. Honeykrisp issues compute for far more
+ * than vkCmdDispatch: on AGX the geometry-shader/pre-rasterization path runs
+ * the VERTEX shader as a compute dispatch, and tessellation is emulated
+ * entirely in compute. With ~1750 dispatches per frame in Ghost of Tsushima and
+ * 90% of GPU time in compute, which of these it is decides everything.
+ */
+enum hk_disp_kind {
+   HK_DISP_APP = 0,   /* vkCmdDispatch* -- the application's own compute */
+   HK_DISP_GS,        /* geometry shader / pre-rasterization, incl. VS-in-CS */
+   HK_DISP_TESS,      /* tessellation emulation */
+   HK_DISP_OTHER,     /* driver internals: meta ops, query resolves */
+   HK_DISP_KINDS,
+};
+
 enum hk_gputime_kind {
    HK_GPUTIME_VTX = 0,
    HK_GPUTIME_FRAG,
@@ -101,6 +116,9 @@ struct hk_gputime {
    uint64_t report_period_ns;
    uint64_t skipped;      /* commands whose end slot the app had claimed */
    uint64_t presents;     /* frames delivered, counted at vkQueuePresentKHR */
+   uint64_t dispatches;   /* compute dispatches inside those commands */
+   uint64_t draws;        /* draws inside the render commands */
+   uint64_t disp_kind[HK_DISP_KINDS];
 };
 
 void hk_gputime_init(struct hk_device *dev);
@@ -124,5 +142,8 @@ hk_gputime_offset(int block, unsigned slot)
  * period has elapsed, prints a summary. Cheap enough to call unconditionally.
  */
 void hk_gputime_tick(struct hk_device *dev);
+
+/* Attribute one dispatch to its origin. Cheap enough to call unconditionally. */
+void hk_gputime_note_dispatch(struct hk_device *dev, enum hk_disp_kind kind);
 
 #endif

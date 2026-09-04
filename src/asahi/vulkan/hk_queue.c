@@ -95,6 +95,8 @@ asahi_fill_cdm_command(struct hk_device *dev, struct hk_cs *cs,
     * already owns the end slot -- the app's query always wins.
     */
    if (dev->gputime.enabled) {
+      p_atomic_add(&dev->gputime.dispatches, cs->stats.cmds);
+
       if (cs->timestamp.end.handle) {
          p_atomic_inc(&dev->gputime.skipped);
       } else {
@@ -243,6 +245,8 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
     * pair is only ours when the app has not claimed the end slot for a query.
     */
    if (dev->gputime.enabled) {
+      p_atomic_add(&dev->gputime.draws, cs->stats.cmds);
+
       int blk = hk_gputime_reserve(dev);
       if (blk >= 0) {
          c->ts_vtx.start.handle = dev->gputime.handle;

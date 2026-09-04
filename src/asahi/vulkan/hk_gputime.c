@@ -87,6 +87,13 @@ hk_gputime_finish(struct hk_device *dev)
    gt->bo = NULL;
 }
 
+void
+hk_gputime_note_dispatch(struct hk_device *dev, enum hk_disp_kind kind)
+{
+   if (dev->gputime.enabled)
+      p_atomic_inc(&dev->gputime.disp_kind[kind]);
+}
+
 int
 hk_gputime_reserve(struct hk_device *dev)
 {
@@ -200,6 +207,29 @@ hk_gputime_report(struct hk_device *dev, uint64_t now_ns)
               cnt[k] ? (ms * 1000.0) / cnt[k] : 0.0);
    }
 
+   /* Per-COMMAND cost says little on its own: a command is a whole control
+    * stream and may hold one dispatch or a hundred. Per-DISPATCH cost is what
+    * distinguishes the driver issuing many small internal dispatches from the
+    * application issuing a few expensive ones.
+    */
+   if (gt->dispatches || gt->draws) {
+      double comp_ms = (sum[HK_GPUTIME_COMP] / hz) * 1000.0;
+      fprintf(stderr,
+              "[hk gputime]   dispatch origin: app %llu, gs/prerast %llu, "
+              "tess %llu, other %llu\n",
+              (unsigned long long)gt->disp_kind[HK_DISP_APP],
+              (unsigned long long)gt->disp_kind[HK_DISP_GS],
+              (unsigned long long)gt->disp_kind[HK_DISP_TESS],
+              (unsigned long long)gt->disp_kind[HK_DISP_OTHER]);
+      fprintf(stderr,
+              "[hk gputime]   %llu dispatches (%.1f/cmd, %.1f us each)  "
+              "%llu draws\n",
+              (unsigned long long)gt->dispatches,
+              cnt[HK_GPUTIME_COMP] ? (double)gt->dispatches / cnt[HK_GPUTIME_COMP] : 0.0,
+              gt->dispatches ? (comp_ms * 1000.0) / gt->dispatches : 0.0,
+              (unsigned long long)gt->draws);
+   }
+
    double busy_ms = (busy / hz) * 1000.0;
    fprintf(stderr,
            "[hk gputime]   GPU busy (union) %.1f ms = %.1f%% of wall%s\n",
@@ -215,6 +245,9 @@ hk_gputime_report(struct hk_device *dev, uint64_t now_ns)
    util_dynarray_clear(&gt->intervals);
    gt->skipped = 0;
    gt->presents = 0;
+   gt->dispatches = 0;
+   gt->draws = 0;
+   memset(gt->disp_kind, 0, sizeof(gt->disp_kind));
    gt->report_start_ns = now_ns;
 }
 

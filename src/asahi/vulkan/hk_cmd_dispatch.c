@@ -134,6 +134,8 @@ dispatch(struct hk_cmd_buffer *cmd, struct agx_grid grid)
       grid.count[2] *= local_size.z;
    }
 
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   hk_gputime_note_dispatch(dev, HK_DISP_APP);
    hk_dispatch_with_local_size(cmd, cs, s, grid, local_size, AGX_BARRIER_ALL);
    cs->stats.calls++;
 }
