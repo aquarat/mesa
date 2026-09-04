@@ -3353,6 +3353,22 @@ agx_remove_unreachable_blocks(agx_context *ctx)
  */
 static __thread FILE *agx_dump_out;
 
+/*
+ * Debug bits requested for the shader THIS thread is compiling, as opposed to
+ * the ones the environment asked for globally.
+ *
+ * agx_compiler_debug is a plain global that agx_compile_shader_nir() reassigns
+ * on entry. Pipeline compiles run on many threads at once, so a thread that
+ * ORs its own AGX_DBG_SHADERS into that global has it wiped moments later by
+ * the next thread entering the compiler -- which is exactly what happened:
+ * AGX_DUMP_SHADER printed its "=== match ===" header and then no shader,
+ * because the flag was gone by the time nir_print_shader() was reached.
+ *
+ * Thread-local, and consulted alongside the global rather than written into
+ * it, so one thread's targeted dump cannot be cancelled by another's.
+ */
+static __thread unsigned agx_dump_flags;
+
 static FILE *
 agx_dump_stream(void)
 {
@@ -3362,8 +3378,10 @@ agx_dump_stream(void)
 static bool
 agx_should_dump(nir_shader *nir, unsigned agx_dbg_bit)
 {
-   return (agx_compiler_debug & agx_dbg_bit) &&
-          !(nir->info.internal && !(agx_compiler_debug & AGX_DBG_INTERNAL));
+   unsigned debug = agx_compiler_debug | agx_dump_flags;
+
+   return (debug & agx_dbg_bit) &&
+          !(nir->info.internal && !(debug & AGX_DBG_INTERNAL));
 }
 
 #define AGX_PASS(shader, pass, ...)                                            \
@@ -3774,13 +3792,14 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
 {
    agx_compiler_debug = agx_get_compiler_debug();
    agx_dump_out = NULL;
+   agx_dump_flags = 0;
 
    if (unlikely(agx_shader_requested_by_hash(nir))) {
       char hex[BLAKE3_HEX_LEN];
       _mesa_blake3_format(hex, nir->info.source_blake3);
       fprintf(stderr, "\n=== AGX_DUMP_SHADER match: %s (%s) ===\n", hex,
               _mesa_shader_stage_to_abbrev(nir->info.stage));
-      agx_compiler_debug |= AGX_DBG_SHADERS | AGX_DBG_SHADERDB;
+      agx_dump_flags = AGX_DBG_SHADERS | AGX_DBG_SHADERDB | AGX_DBG_INTERNAL;
       agx_dump_out = stderr;
    }
 
