@@ -82,10 +82,50 @@ struct agx_bo;
  */
 enum hk_disp_kind {
    HK_DISP_APP = 0,   /* vkCmdDispatch* -- the application's own compute */
+   HK_DISP_META,      /* vk_meta copies/blits, which also go via vkCmdDispatch */
    HK_DISP_GS,        /* geometry shader / pre-rasterization, incl. VS-in-CS */
    HK_DISP_TESS,      /* tessellation emulation */
-   HK_DISP_OTHER,     /* driver internals: meta ops, query resolves */
+   HK_DISP_PRECOMP,   /* libagx helper kernels (clears, fills, prefix sums...) */
    HK_DISP_KINDS,
+};
+
+/*
+ * Per-shader accounting.
+ *
+ * "The application's own compute shaders are 72% of GPU time" is not yet an
+ * actionable statement: it does not say whether that is five shaders run 250
+ * times each or two hundred run six times. Optimisation cannot start until the
+ * work is ranked, so every dispatch is attributed to the shader that ran.
+ *
+ * The key is the agx_shader_info pointer, which is stable for the lifetime of a
+ * compiled variant and unique per variant. Alongside the dynamic counts we keep
+ * the compiler's own static estimates (agx2_stats: ALU/FSCIB/IC cycles, GPRs,
+ * achievable occupancy, spills) so the report can rank by
+ *
+ *     invocations x cycles-per-invocation
+ *
+ * which is the closest thing to a cost model available without per-dispatch
+ * timestamps -- the firmware timestamps a whole control stream, and a control
+ * stream here holds ~32 dispatches.
+ */
+#define HK_GPUTIME_MAX_SHADERS 1024
+#define HK_GPUTIME_MAX_PRECOMP 128
+
+struct agx_shader_info;
+
+struct hk_gputime_shader {
+   const struct agx_shader_info *info; /* identity; NULL means a free slot */
+   uint32_t id;                        /* small stable index, for reports */
+   uint32_t kind;                      /* enum hk_disp_kind of first use */
+   uint64_t dispatches;
+   uint64_t indirect;                  /* dispatches with an indirect grid */
+   uint64_t threads;                   /* invocations launched (direct only) */
+};
+
+struct hk_gputime_precomp {
+   uint64_t dispatches;
+   uint64_t threads;
+   uint64_t indirect;
 };
 
 enum hk_gputime_kind {
@@ -119,6 +159,18 @@ struct hk_gputime {
    uint64_t dispatches;   /* compute dispatches inside those commands */
    uint64_t draws;        /* draws inside the render commands */
    uint64_t disp_kind[HK_DISP_KINDS];
+
+   /* Recorded at the CDM chokepoint rather than at submit, so it can be
+    * compared against `dispatches` (which is summed at submit) to show whether
+    * record-time attribution and submit-time counting agree.
+    */
+   uint64_t disp_recorded;
+
+   simple_mtx_t shader_lock; /* guards the two tables below */
+   struct hk_gputime_shader shaders[HK_GPUTIME_MAX_SHADERS];
+   uint32_t nr_shaders;
+   uint64_t shader_overflow; /* dispatches dropped when the table filled */
+   struct hk_gputime_precomp precomp[HK_GPUTIME_MAX_PRECOMP];
 };
 
 void hk_gputime_init(struct hk_device *dev);
@@ -143,7 +195,19 @@ hk_gputime_offset(int block, unsigned slot)
  */
 void hk_gputime_tick(struct hk_device *dev);
 
-/* Attribute one dispatch to its origin. Cheap enough to call unconditionally. */
-void hk_gputime_note_dispatch(struct hk_device *dev, enum hk_disp_kind kind);
+/*
+ * Attribute one dispatch, called from the two wrappers that between them reach
+ * every CDM launch. Both are past their early-returns, so the totals reconcile
+ * exactly with cs->stats.cmds.
+ *
+ * `threads` is the launch grid in invocations, valid only when !indirect: an
+ * indirect grid lives in GPU memory and the CPU cannot know it here.
+ */
+void hk_gputime_note_shader(struct hk_device *dev, enum hk_disp_kind kind,
+                            const struct agx_shader_info *info,
+                            uint64_t threads, bool indirect);
+
+void hk_gputime_note_precomp(struct hk_device *dev, unsigned prog,
+                             uint64_t threads, bool indirect);
 
 #endif

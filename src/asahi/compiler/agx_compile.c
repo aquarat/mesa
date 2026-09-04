@@ -3712,6 +3712,10 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
 
    memset(out, 0, sizeof *out);
 
+   STATIC_ASSERT(sizeof(info->source_blake3) == sizeof(nir->info.source_blake3));
+   memcpy(info->source_blake3, nir->info.source_blake3,
+          sizeof(info->source_blake3));
+
    assert(nir->info.io_lowered &&
           "agx_preprocess_nir is called first, then the shader is specalized,"
           "then the specialized shader is compiled");

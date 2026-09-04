@@ -773,6 +773,19 @@ hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
 
    agx_usc_words_precomp(t.cpu, &prog->b, uploaded_data, data_size);
 
+   /* The other half of the origin accounting. These are the driver's own helper
+    * kernels -- clears, fills, copies, prefix sums, query bookkeeping -- and
+    * were the entire unattributed remainder before this.
+    */
+   if (unlikely(dev->gputime.enabled)) {
+      bool indirect = agx_is_indirect(grid);
+      uint64_t threads =
+         indirect ? 0
+                  : (uint64_t)grid.count[0] * grid.count[1] * grid.count[2];
+
+      hk_gputime_note_precomp(dev, idx, threads, indirect);
+   }
+
    hk_dispatch_with_usc_launch(dev, cs, prog->b.launch,
                                agx_usc_addr(&dev->dev, t.gpu), grid,
                                prog->b.workgroup, barrier);
