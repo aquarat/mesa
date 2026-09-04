@@ -1501,6 +1501,44 @@ agx_ra(agx_context *ctx)
    if (agx_compiler_debug & AGX_DBG_DEMAND)
       max_regs = ALIGN_POT(MAX2(demand, 12), reg_file_alignment);
 
+   /* AGX_OCCUPANCY=<threads> caps registers to whatever a given occupancy
+    * allows, trading spills for threads in flight.
+    *
+    * The policy above rounds demand UP to the ceiling of the occupancy tier it
+    * already landed in, which minimises live range splitting but never tries to
+    * reach a HIGHER tier. Measured on Ghost of Tsushima, the five shaders
+    * holding 68% of compute time all sit at 384 or 576 threads of a possible
+    * 1024, and the top two are at the 255-GPR ceiling spilling 272 times. Where
+    * that balance should sit is not something to reason about -- it depends on
+    * whether the extra threads hide more latency than the spill traffic adds --
+    * so make it sweepable and measure it.
+    */
+   {
+      const char *occ = getenv("AGX_OCCUPANCY");
+      if (unlikely(occ != NULL)) {
+         unsigned want = atoi(occ);
+         if (want >= 32) {
+            unsigned capped = agx_max_registers_for_occupancy(want);
+            capped = ROUND_DOWN_TO(capped, reg_file_alignment);
+
+            /* NEVER below `demand`. Capping under it asks the allocator to
+             * spill through a path that is not set up for it -- the
+             * force_spilling case above does extra work to guarantee room for
+             * preloaded and exported registers, which this does not. Doing so
+             * crashed vkCreateComputePipelines outright (0xc0000005, and a
+             * stack buffer overrun) on Ghost of Tsushima at AGX_OCCUPANCY=512.
+             *
+             * The consequence is that this knob can only give BACK registers
+             * the tier-rounding handed out, never force the extra spilling that
+             * a genuinely higher occupancy would need. Testing that trade
+             * properly requires spiller work, not an environment variable.
+             */
+            if (capped >= demand && capped >= (6 * 2))
+               max_regs = MIN2(max_regs, capped);
+         }
+      }
+   }
+
    /* ...but not too tightly */
    assert((max_regs % reg_file_alignment) == 0 && "occupancy limits aligned");
    assert(max_regs >= (6 * 2) && "space for vertex shader preloading");
