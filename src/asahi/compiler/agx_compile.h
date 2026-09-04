@@ -6,6 +6,7 @@
 #pragma once
 
 #include "compiler/nir/nir.h"
+#include "util/mesa-blake3.h"
 #include "util/shader_stats.h"
 #include "util/u_dynarray.h"
 #include "util/u_tristate.h"
@@ -163,6 +164,16 @@ struct agx_shader_info {
    struct agx_rodata rodata;
 
    struct agx2_stats stats;
+
+   /* BLAKE3 of the SPIR-V this shader was compiled from, copied out of
+    * nir_shader_info. The driver has no other stable name for a shader: the
+    * agx_shader_info pointer identifies a variant only within one process, and
+    * the disassembly AGX_MESA_DEBUG=shaders prints carries no identifier of its
+    * own -- the hash appears only in the NIR header printed above it. Carrying
+    * it here is what lets a profile that says "shader X is 30% of the frame"
+    * be joined to shader X's actual machine code.
+    */
+   blake3_hash source_blake3;
 };
 
 struct agx_precompiled_kernel_info {

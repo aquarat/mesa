@@ -88,8 +88,21 @@ void
 hk_dispatch_with_usc(struct hk_device *dev, struct hk_cs *cs,
                      struct agx_shader_info *info, uint32_t usc,
                      struct agx_grid grid, struct agx_workgroup local_size,
-                     enum agx_barrier barrier)
+                     enum agx_barrier barrier, enum hk_disp_kind kind)
 {
+   /* Every CDM launch in the driver reaches the chokepoint below through either
+    * this function or hk_dispatch_precomp, and both are past their early
+    * returns here, so the origin counts reconcile exactly with cs->stats.cmds.
+    */
+   if (unlikely(dev->gputime.enabled)) {
+      bool indirect = agx_is_indirect(grid);
+      uint64_t threads =
+         indirect ? 0
+                  : (uint64_t)grid.count[0] * grid.count[1] * grid.count[2];
+
+      hk_gputime_note_shader(dev, kind, info, threads, indirect);
+   }
+
    struct agx_cdm_launch_word_0_packed launch;
    agx_pack(&launch, CDM_LAUNCH_WORD_0, cfg) {
       cfg.texture_state_register_count = info->texture_state_count;
@@ -134,9 +147,12 @@ dispatch(struct hk_cmd_buffer *cmd, struct agx_grid grid)
       grid.count[2] *= local_size.z;
    }
 
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   hk_gputime_note_dispatch(dev, HK_DISP_APP);
-   hk_dispatch_with_local_size(cmd, cs, s, grid, local_size, AGX_BARRIER_ALL);
+   /* vk_meta implements image copies and blits by calling vkCmdDispatch, so
+    * without this they would be indistinguishable from the application's own
+    * compute -- and mislabelled as it.
+    */
+   hk_dispatch_with_local_size(cmd, cs, s, grid, local_size, AGX_BARRIER_ALL,
+                               cmd->in_meta ? HK_DISP_META : HK_DISP_APP);
    cs->stats.calls++;
 }
 

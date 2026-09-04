@@ -9,8 +9,11 @@
 #include <stdlib.h>
 
 #include "agx_bo.h"
+#include "agx_compile.h"
 #include "agx_device.h"
 #include "hk_device.h"
+#include "libagx_shaders.h"
+#include "shader_enums.h"
 
 #include "util/os_time.h"
 #include "util/u_atomic.h"
@@ -63,6 +66,7 @@ hk_gputime_init(struct hk_device *dev)
    gt->report_period_ns = (uint64_t)(period_s * 1000000000.0);
    gt->last_scan_ns = gt->report_start_ns = os_time_get_nano();
    simple_mtx_init(&gt->lock, mtx_plain);
+   simple_mtx_init(&gt->shader_lock, mtx_plain);
    util_dynarray_init(&gt->intervals, NULL);
    gt->enabled = true;
 
@@ -83,15 +87,161 @@ hk_gputime_finish(struct hk_device *dev)
    gt->enabled = false;
    util_dynarray_fini(&gt->intervals);
    simple_mtx_destroy(&gt->lock);
+   simple_mtx_destroy(&gt->shader_lock);
    agx_bo_unreference(&dev->dev, gt->bo);
    gt->bo = NULL;
 }
 
+/*
+ * Names for the libagx helper kernels. Generated from the enum in
+ * libagx_shaders.h; the static_assert below fires if that enum grows, which is
+ * the only way this can go stale.
+ */
+static const char *libagx_program_name[] = {
+   [LIBAGX_DECOMPRESS_0] = "decompress_0",
+   [LIBAGX_DECOMPRESS_1] = "decompress_1",
+   [LIBAGX_DECOMPRESS_2] = "decompress_2",
+   [LIBAGX_FAST_CLEAR_0] = "fast_clear_0",
+   [LIBAGX_FAST_CLEAR_1] = "fast_clear_1",
+   [LIBAGX_FAST_CLEAR_2] = "fast_clear_2",
+   [LIBAGX_FAST_CLEAR_3] = "fast_clear_3",
+   [LIBAGX_FAST_CLEAR_4] = "fast_clear_4",
+   [LIBAGX_FAST_CLEAR_5] = "fast_clear_5",
+   [LIBAGX_FAST_CLEAR_6] = "fast_clear_6",
+   [LIBAGX_FAST_CLEAR_7] = "fast_clear_7",
+   [LIBAGX_FAST_CLEAR_8] = "fast_clear_8",
+   [LIBAGX_FAST_CLEAR_9] = "fast_clear_9",
+   [LIBAGX_FAST_CLEAR_10] = "fast_clear_10",
+   [LIBAGX_FAST_CLEAR_11] = "fast_clear_11",
+   [LIBAGX_FAST_CLEAR_12] = "fast_clear_12",
+   [LIBAGX_FAST_CLEAR_13] = "fast_clear_13",
+   [LIBAGX_FAST_CLEAR_14] = "fast_clear_14",
+   [LIBAGX_FILL] = "fill",
+   [LIBAGX_COPY_UINT4] = "copy_uint4",
+   [LIBAGX_COPY_UCHAR] = "copy_uchar",
+   [LIBAGX_FILL_UINT4] = "fill_uint4",
+   [LIBAGX_PREDICATE_INDIRECT_0] = "predicate_indirect_0",
+   [LIBAGX_PREDICATE_INDIRECT_1] = "predicate_indirect_1",
+   [LIBAGX_DRAW_WITHOUT_ADJ] = "draw_without_adj",
+   [LIBAGX_DRAW_ROBUST_INDEX_0] = "draw_robust_index_0",
+   [LIBAGX_DRAW_ROBUST_INDEX_1] = "draw_robust_index_1",
+   [LIBAGX_DRAW_ROBUST_INDEX_2] = "draw_robust_index_2",
+   [LIBAGX_INCREMENT_IA] = "increment_ia",
+   [LIBAGX_INCREMENT_IA_RESTART] = "increment_ia_restart",
+   [LIBAGX_UNROLL_RESTART_0] = "unroll_restart_0",
+   [LIBAGX_UNROLL_RESTART_1] = "unroll_restart_1",
+   [LIBAGX_UNROLL_RESTART_2] = "unroll_restart_2",
+   [LIBAGX_UNROLL_RESTART_3] = "unroll_restart_3",
+   [LIBAGX_UNROLL_RESTART_4] = "unroll_restart_4",
+   [LIBAGX_UNROLL_RESTART_5] = "unroll_restart_5",
+   [LIBAGX_UNROLL_RESTART_6] = "unroll_restart_6",
+   [LIBAGX_UNROLL_RESTART_7] = "unroll_restart_7",
+   [LIBAGX_UNROLL_RESTART_8] = "unroll_restart_8",
+   [LIBAGX_UNROLL_RESTART_9] = "unroll_restart_9",
+   [LIBAGX_UNROLL_RESTART_10] = "unroll_restart_10",
+   [LIBAGX_GS_SETUP_INDIRECT] = "gs_setup_indirect",
+   [LIBAGX_PREFIX_SUM_GEOM] = "prefix_sum_geom",
+   [LIBAGX_PREFIX_SUM_TESS_0] = "prefix_sum_tess_0",
+   [LIBAGX_PREFIX_SUM_TESS_1] = "prefix_sum_tess_1",
+   [LIBAGX_PREFIX_SUM_TESS_REDUCE] = "prefix_sum_tess_reduce",
+   [LIBAGX_PREFIX_SUM_TESS_SCAN_0] = "prefix_sum_tess_scan_0",
+   [LIBAGX_PREFIX_SUM_TESS_SCAN_1] = "prefix_sum_tess_scan_1",
+   [LIBAGX_COPY_QUERY] = "copy_query",
+   [LIBAGX_RESET_QUERY] = "reset_query",
+   [LIBAGX_COPY_QUERY_GL] = "copy_query_gl",
+   [LIBAGX_COPY_XFB_COUNTERS] = "copy_xfb_counters",
+   [LIBAGX_INCREMENT_STATISTIC] = "increment_statistic",
+   [LIBAGX_INCREMENT_CS_INVOCATIONS] = "increment_cs_invocations",
+   [LIBAGX_WRITE_U32S] = "write_u32s",
+   [LIBAGX_COPY_TIMESTAMP] = "copy_timestamp",
+   [LIBAGX_WRITE_U32] = "write_u32",
+   [LIBAGX_TESS_SETUP_INDIRECT] = "tess_setup_indirect",
+   [LIBAGX_TESS_ISOLINE_0] = "tess_isoline_0",
+   [LIBAGX_TESS_ISOLINE_1] = "tess_isoline_1",
+   [LIBAGX_TESS_TRI_0] = "tess_tri_0",
+   [LIBAGX_TESS_TRI_1] = "tess_tri_1",
+   [LIBAGX_TESS_QUAD_0] = "tess_quad_0",
+   [LIBAGX_TESS_QUAD_1] = "tess_quad_1",
+   [LIBAGX_HELPER] = "helper",
+};
+static_assert(ARRAY_SIZE(libagx_program_name) == LIBAGX_NUM_PROGRAMS,
+              "libagx program names are out of date with libagx_shaders.h");
+
 void
-hk_gputime_note_dispatch(struct hk_device *dev, enum hk_disp_kind kind)
+hk_gputime_note_precomp(struct hk_device *dev, unsigned prog, uint64_t threads,
+                        bool indirect)
 {
-   if (dev->gputime.enabled)
-      p_atomic_inc(&dev->gputime.disp_kind[kind]);
+   struct hk_gputime *gt = &dev->gputime;
+   if (!gt->enabled)
+      return;
+
+   p_atomic_inc(&gt->disp_kind[HK_DISP_PRECOMP]);
+   p_atomic_inc(&gt->disp_recorded);
+
+   if (prog >= HK_GPUTIME_MAX_PRECOMP)
+      return;
+
+   struct hk_gputime_precomp *p = &gt->precomp[prog];
+   p_atomic_inc(&p->dispatches);
+   if (indirect)
+      p_atomic_inc(&p->indirect);
+   else
+      p_atomic_add(&p->threads, threads);
+}
+
+/*
+ * Find or create the table entry for a shader. Open addressing on the pointer:
+ * there are a few hundred live shaders at most, the table is oversized, and the
+ * probe is a handful of cache lines. Called under shader_lock.
+ */
+static struct hk_gputime_shader *
+hk_gputime_shader_entry(struct hk_gputime *gt, const struct agx_shader_info *info,
+                        enum hk_disp_kind kind)
+{
+   uint32_t mask = HK_GPUTIME_MAX_SHADERS - 1;
+   uint32_t h = (uint32_t)(((uintptr_t)info >> 4) * 2654435761u) & mask;
+
+   for (uint32_t probe = 0; probe <= mask; ++probe) {
+      struct hk_gputime_shader *e = &gt->shaders[(h + probe) & mask];
+
+      if (e->info == info)
+         return e;
+
+      if (e->info == NULL) {
+         e->info = info;
+         e->id = gt->nr_shaders++;
+         e->kind = kind;
+         return e;
+      }
+   }
+
+   return NULL;
+}
+
+void
+hk_gputime_note_shader(struct hk_device *dev, enum hk_disp_kind kind,
+                       const struct agx_shader_info *info, uint64_t threads,
+                       bool indirect)
+{
+   struct hk_gputime *gt = &dev->gputime;
+   if (!gt->enabled)
+      return;
+
+   p_atomic_inc(&gt->disp_kind[kind]);
+   p_atomic_inc(&gt->disp_recorded);
+
+   simple_mtx_lock(&gt->shader_lock);
+   struct hk_gputime_shader *e = hk_gputime_shader_entry(gt, info, kind);
+   if (e) {
+      e->dispatches++;
+      if (indirect)
+         e->indirect++;
+      else
+         e->threads += threads;
+   } else {
+      gt->shader_overflow++;
+   }
+   simple_mtx_unlock(&gt->shader_lock);
 }
 
 int
@@ -146,6 +296,191 @@ hk_gputime_scan(struct hk_gputime *gt)
       harvest(gt, blk, HK_GPUTIME_SLOT_COMP_START, HK_GPUTIME_SLOT_COMP_END,
               HK_GPUTIME_COMP);
    }
+}
+
+static const char *
+hk_disp_kind_name(uint32_t kind)
+{
+   static const char *n[HK_DISP_KINDS] = {"app", "meta", "gs", "tess",
+                                          "precomp"};
+   return kind < HK_DISP_KINDS ? n[kind] : "?";
+}
+
+/*
+ * Cost model.
+ *
+ * The firmware timestamps a control stream, not a dispatch, and a compute
+ * control stream here holds ~32 dispatches -- so there is no way to measure one
+ * shader directly without splitting streams, which would perturb the thing
+ * being measured beyond usefulness. Instead: invocations (known exactly, from
+ * the launch grid) times the compiler's own per-invocation cycle estimate.
+ *
+ * agx2_stats carries three estimates, one per issue pipe: alu, fscib (F16/F32
+ * and the SCIB path) and ic. A shader is limited by whichever pipe is busiest,
+ * so the max is the right per-invocation figure -- not the sum, which would
+ * assume the pipes never overlap.
+ *
+ * This is an estimate and is blind to memory stalls, which is exactly why the
+ * occupancy column ("thr", max threads in flight per core, which register
+ * pressure caps) is printed next to it: a shader with a low estimate and low
+ * occupancy is a memory-bound shader the model will under-rank.
+ */
+static uint64_t
+hk_shader_cycles_per_invocation(const struct agx_shader_info *info)
+{
+   uint32_t c = MAX2(info->stats.alu, info->stats.fscib);
+   return MAX2(c, info->stats.ic);
+}
+
+static int
+cmp_shader_cost(const void *a, const void *b)
+{
+   const struct hk_gputime_shader *x = a, *y = b;
+   uint64_t cx = x->threads * hk_shader_cycles_per_invocation(x->info);
+   uint64_t cy = y->threads * hk_shader_cycles_per_invocation(y->info);
+
+   if (cx != cy)
+      return cx > cy ? -1 : 1;
+   return (x->dispatches < y->dispatches) - (x->dispatches > y->dispatches);
+}
+
+/* lock held */
+static void
+hk_gputime_report_shaders(struct hk_gputime *gt, uint64_t frames)
+{
+   double per_frame = frames ? 1.0 / (double)frames : 0.0;
+
+   simple_mtx_lock(&gt->shader_lock);
+
+   /* Compact the live entries out of the open-addressed table so they can be
+    * sorted without disturbing the probe sequence.
+    */
+   /* static, not on the stack: 40 KB of frame in a driver thread is a poor
+    * trade for a table that is only ever touched under shader_lock. */
+   static struct hk_gputime_shader live[HK_GPUTIME_MAX_SHADERS];
+   unsigned n = 0;
+   uint64_t total_cycles = 0;
+
+   for (unsigned i = 0; i < HK_GPUTIME_MAX_SHADERS; ++i) {
+      struct hk_gputime_shader *e = &gt->shaders[i];
+      if (!e->info || !e->dispatches)
+         continue;
+
+      live[n++] = *e;
+      total_cycles += e->threads * hk_shader_cycles_per_invocation(e->info);
+
+      /* Keep the identity and the id, drop the counts: the report is per
+       * period, but a shader must keep the same id across periods to be
+       * followed from one report to the next.
+       */
+      e->dispatches = 0;
+      e->indirect = 0;
+      e->threads = 0;
+   }
+
+   qsort(live, n, sizeof(*live), cmp_shader_cost);
+
+   if (n) {
+      fprintf(stderr,
+              "[hk gputime]   top compute shaders by estimated cost "
+              "(%u live, %.3f Gcycle total)\n",
+              n, total_cycles / 1.0e9);
+      fprintf(stderr,
+              "[hk gputime]     %-4s %-5s %-8s %-10s %-8s  %5s %5s %5s %5s "
+              "%5s %5s %-5s %s\n",
+              "id", "kind", "disp/fr", "invoc/fr", "share", "cyc", "inst",
+              "gprs", "thr", "spil", "wg", "stage", "spirv");
+
+      for (unsigned i = 0; i < MIN2(n, 20); ++i) {
+         struct hk_gputime_shader *e = &live[i];
+         const struct agx_shader_info *in = e->info;
+         uint64_t cyc = hk_shader_cycles_per_invocation(in);
+         uint64_t cost = e->threads * cyc;
+
+         /* The SPIR-V hash is the join key to the disassembly: run the game
+          * once with AGX_MESA_DEBUG=shaders (and MESA_SHADER_CACHE_DISABLE=true,
+          * or nothing is compiled the second time) and the NIR header above
+          * each dump carries the same source_blake3.
+          */
+         char blake[BLAKE3_HEX_LEN];
+         _mesa_blake3_format(blake, in->source_blake3);
+         blake[12] = '\0';
+
+         fprintf(stderr,
+                 "[hk gputime]     %-4u %-5s %8.1f %10.0f %7.1f%%  %5llu "
+                 "%5u %5u %5u %5u %5u %-5s %s%s\n",
+                 e->id, hk_disp_kind_name(e->kind),
+                 e->dispatches * per_frame, e->threads * per_frame,
+                 total_cycles ? 100.0 * cost / total_cycles : 0.0,
+                 (unsigned long long)cyc, in->stats.instrs, in->stats.gprs,
+                 in->stats.threads, in->stats.spills + in->stats.fills,
+                 in->workgroup_size[0] * in->workgroup_size[1] *
+                    in->workgroup_size[2],
+                 _mesa_shader_stage_to_abbrev(in->stage), blake,
+                 e->indirect ? " (indirect)" : "");
+      }
+   }
+
+   if (gt->shader_overflow) {
+      fprintf(stderr, "[hk gputime]   %llu dispatch(es) lost, shader table full\n",
+              (unsigned long long)gt->shader_overflow);
+      gt->shader_overflow = 0;
+   }
+
+   /* The libagx helper kernels. This is the bucket that was unattributed: the
+    * driver's own clears, fills, copies, prefix sums and query bookkeeping.
+    */
+   struct precomp_row {
+      unsigned prog;
+      struct hk_gputime_precomp p;
+   };
+   static struct precomp_row pc[HK_GPUTIME_MAX_PRECOMP];
+   unsigned np = 0;
+   uint64_t pc_total = 0;
+
+   for (unsigned i = 0; i < HK_GPUTIME_MAX_PRECOMP; ++i) {
+      if (!gt->precomp[i].dispatches)
+         continue;
+
+      pc[np].prog = i;
+      pc[np].p = gt->precomp[i];
+      np++;
+      pc_total += gt->precomp[i].dispatches;
+      memset(&gt->precomp[i], 0, sizeof(gt->precomp[i]));
+   }
+
+   /* Sort by dispatch count; the struct's first member is the count's home so
+    * reuse the interval comparator shape via a small local sort instead.
+    */
+   for (unsigned i = 1; i < np; ++i) {
+      for (unsigned j = i; j > 0 && pc[j].p.dispatches > pc[j - 1].p.dispatches;
+           --j) {
+         struct precomp_row t = pc[j];
+         pc[j] = pc[j - 1];
+         pc[j - 1] = t;
+      }
+   }
+
+   if (np) {
+      fprintf(stderr,
+              "[hk gputime]   driver helper kernels: %llu dispatches "
+              "(%.1f/frame) across %u kernels\n",
+              (unsigned long long)pc_total, pc_total * per_frame, np);
+
+      for (unsigned i = 0; i < MIN2(np, 12); ++i) {
+         const char *name = pc[i].prog < ARRAY_SIZE(libagx_program_name)
+                               ? libagx_program_name[pc[i].prog]
+                               : "?";
+         fprintf(stderr,
+                 "[hk gputime]     %-24s %8.1f disp/fr  %10.0f invoc/fr"
+                 "  %5.1f%%\n",
+                 name, pc[i].p.dispatches * per_frame,
+                 pc[i].p.threads * per_frame,
+                 pc_total ? 100.0 * pc[i].p.dispatches / pc_total : 0.0);
+      }
+   }
+
+   simple_mtx_unlock(&gt->shader_lock);
 }
 
 static int
@@ -215,12 +550,14 @@ hk_gputime_report(struct hk_device *dev, uint64_t now_ns)
    if (gt->dispatches || gt->draws) {
       double comp_ms = (sum[HK_GPUTIME_COMP] / hz) * 1000.0;
       fprintf(stderr,
-              "[hk gputime]   dispatch origin: app %llu, gs/prerast %llu, "
-              "tess %llu, other %llu\n",
+              "[hk gputime]   dispatch origin: app %llu, meta %llu, "
+              "gs/prerast %llu, tess %llu, precomp %llu  (recorded %llu)\n",
               (unsigned long long)gt->disp_kind[HK_DISP_APP],
+              (unsigned long long)gt->disp_kind[HK_DISP_META],
               (unsigned long long)gt->disp_kind[HK_DISP_GS],
               (unsigned long long)gt->disp_kind[HK_DISP_TESS],
-              (unsigned long long)gt->disp_kind[HK_DISP_OTHER]);
+              (unsigned long long)gt->disp_kind[HK_DISP_PRECOMP],
+              (unsigned long long)gt->disp_recorded);
       fprintf(stderr,
               "[hk gputime]   %llu dispatches (%.1f/cmd, %.1f us each)  "
               "%llu draws\n",
@@ -242,8 +579,11 @@ hk_gputime_report(struct hk_device *dev, uint64_t now_ns)
               (unsigned long long)gt->skipped);
    }
 
+   hk_gputime_report_shaders(gt, gt->presents);
+
    util_dynarray_clear(&gt->intervals);
    gt->skipped = 0;
+   gt->disp_recorded = 0;
    gt->presents = 0;
    gt->dispatches = 0;
    gt->draws = 0;

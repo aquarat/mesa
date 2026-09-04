@@ -846,13 +846,13 @@ void hk_dispatch_with_usc(struct hk_device *dev, struct hk_cs *cs,
                           struct agx_shader_info *info, uint32_t usc,
                           struct agx_grid grid,
                           struct agx_workgroup local_size,
-                          enum agx_barrier barrier);
+                          enum agx_barrier barrier, enum hk_disp_kind kind);
 
 static inline void
 hk_dispatch_with_local_size(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                             struct hk_shader *s, struct agx_grid grid,
                             struct agx_workgroup local_size,
-                            enum agx_barrier barrier)
+                            enum agx_barrier barrier, enum hk_disp_kind kind)
 {
    if (agx_is_shader_empty(&s->b))
       return;
@@ -861,7 +861,8 @@ hk_dispatch_with_local_size(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    uint32_t usc = hk_upload_usc_words(cmd, s, s->only_linked);
 
    hk_reserve_scratch(cmd, cs, s);
-   hk_dispatch_with_usc(dev, cs, &s->b.info, usc, grid, local_size, barrier);
+   hk_dispatch_with_usc(dev, cs, &s->b.info, usc, grid, local_size, barrier,
+                        kind);
 }
 
 void hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,

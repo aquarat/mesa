@@ -1515,13 +1515,12 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
    /* Launch the vertex shader first */
    hk_reserve_scratch(cmd, cs, vs);
-   hk_gputime_note_dispatch(dev, HK_DISP_GS);
    hk_dispatch_with_usc(dev, cs, &vs->b.info,
                         hk_upload_usc_words(cmd, vs,
                                             vs->info.stage == MESA_SHADER_VERTEX
                                                ? gfx->linked[MESA_SHADER_VERTEX]
                                                : vs->only_linked),
-                        grid_vs, wg, AGX_BARRIER_ALL);
+                        grid_vs, wg, AGX_BARRIER_ALL, HK_DISP_GS);
 
    /* Transform feedback and various queries require extra dispatching,
     * determine if we need that here.
@@ -1540,9 +1539,8 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       /* If we need counts, launch the count shader and prefix sum the results. */
       if (count_words) {
          perf_debug(dev, "Geometry shader count");
-         hk_gputime_note_dispatch(dev, HK_DISP_GS);
          hk_dispatch_with_local_size(cmd, cs, count, grid_gs, wg,
-                                     AGX_BARRIER_ALL);
+                                     AGX_BARRIER_ALL, HK_DISP_GS);
       }
 
       if (count->info.gs.prefix_sum) {
@@ -1553,14 +1551,14 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
       /* Transform feedback / query program */
       perf_debug(dev, "Transform feedback / geometry query");
-      hk_gputime_note_dispatch(dev, HK_DISP_GS);
       hk_dispatch_with_local_size(cmd, cs, pre_gs, agx_1d(1),
-                                  agx_workgroup(1, 1, 1), AGX_BARRIER_ALL);
+                                  agx_workgroup(1, 1, 1), AGX_BARRIER_ALL,
+                                  HK_DISP_GS);
    }
 
    /* Pre-rast geometry shader */
-   hk_gputime_note_dispatch(dev, HK_DISP_GS);
-   hk_dispatch_with_local_size(cmd, cs, main, grid_gs, wg, AGX_BARRIER_ALL);
+   hk_dispatch_with_local_size(cmd, cs, main, grid_gs, wg, AGX_BARRIER_ALL,
+                               HK_DISP_GS);
 
    if (poly_gs_indexed(count->info.gs.shape)) {
       enum agx_index_size index_size =
@@ -1664,11 +1662,10 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    hk_reserve_scratch(cmd, cs, vs);
    hk_reserve_scratch(cmd, cs, tcs);
 
-   hk_gputime_note_dispatch(dev, HK_DISP_TESS);
    hk_dispatch_with_usc(
       dev, cs, &vs->b.info,
       hk_upload_usc_words(cmd, vs, gfx->linked[MESA_SHADER_VERTEX]), grid_vs,
-      agx_workgroup(64, 1, 1), AGX_BARRIER_ALL);
+      agx_workgroup(64, 1, 1), AGX_BARRIER_ALL, HK_DISP_TESS);
 
    /* The TCS grid is measured in threads (one per output control point), and we
     * pack as many whole patches into a workgroup as fit in a subgroup. The
@@ -1677,14 +1674,13 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
     * subgroup) needs no special handling: every launched thread maps to a real
     * patch and no thread is launched for a patch that doesn't exist.
     */
-   hk_gputime_note_dispatch(dev, HK_DISP_TESS);
    hk_dispatch_with_usc(
       dev, cs, &tcs->b.info, hk_upload_usc_words(cmd, tcs, tcs->only_linked),
       grid_tcs,
       agx_workgroup(poly_tcs_workgroup_size(
                        tcs->info.tess.tcs_output_patch_size),
                     1, 1),
-      AGX_BARRIER_ALL);
+      AGX_BARRIER_ALL, HK_DISP_TESS);
 
    /* First generate counts, then prefix sum them, and then tessellate. */
    libagx_tessellate(cmd, grid_tess, AGX_BARRIER_ALL | AGX_PREGFX, info.mode,
