@@ -45,6 +45,7 @@ static const struct debug_named_value hk_perf_options[] = {
    {"batch",        HK_PERF_BATCH,        "Batch submissions"},
    {"norobust",     HK_PERF_NOROBUST,     "Disable robustness"},
    {"forcebarrier", HK_PERF_FORCEBARRIER, "Flush caches after every dispatch"},
+   {"noflush",      HK_PERF_NOFLUSH,      "MEASUREMENT ONLY: skip ALL CDM cache flushes (renders incorrectly)"},
    DEBUG_NAMED_VALUE_END
 };
 /* clang-format on */
@@ -327,6 +328,11 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
 
    dev->perftest = debug_get_flags_option("HK_PERFTEST", hk_perf_options, 0);
 
+   if (dev->perftest) {
+      fprintf(stderr, "[hk] HK_PERFTEST active: 0x%x (%s)\n", dev->perftest,
+              getenv("HK_PERFTEST") ?: "");
+   }
+
    if (instance->drirc.misc.disable_border_emulation) {
       dev->perftest |= HK_PERF_NOBORDER;
    }
@@ -439,6 +445,8 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    dev->external_bos.counts = UTIL_DYNARRAY_INIT;
    dev->external_bos.list = UTIL_DYNARRAY_INIT;
 
+   hk_gputime_init(dev);
+
    return VK_SUCCESS;
 
 fail_meta:
@@ -479,6 +487,8 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
 
    if (!dev)
       return;
+
+   hk_gputime_finish(dev);
 
    util_dynarray_fini(&dev->external_bos.counts);
    util_dynarray_fini(&dev->external_bos.list);
