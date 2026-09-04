@@ -188,6 +188,24 @@ static_assert(ARRAY_SIZE(libagx_program_name) == LIBAGX_NUM_PROGRAMS,
               "libagx program names are out of date with libagx_shaders.h");
 
 void
+hk_gputime_note_barrier(struct hk_device *dev, bool compute_only, bool gfx_open)
+{
+   struct hk_gputime *gt = &dev->gputime;
+   if (!gt->enabled)
+      return;
+
+   simple_mtx_lock(&gt->lock);
+   gt->barriers++;
+   if (compute_only) {
+      if (gfx_open)
+         gt->barriers_gfx_open++;
+      else
+         gt->barriers_compute++;
+   }
+   simple_mtx_unlock(&gt->lock);
+}
+
+void
 hk_gputime_note_precomp(struct hk_device *dev, unsigned prog, uint64_t threads,
                         bool indirect)
 {
@@ -441,10 +459,10 @@ hk_gputime_report_shaders(struct hk_gputime *gt, uint64_t frames, double hz)
               total_measured ? "single-shader" : "no");
       fprintf(stderr,
               "[hk gputime]     %-4s %-5s %-8s %-10s %-8s %9s %7s  %5s %5s "
-              "%5s %5s %5s %5s %5s %-5s %s\n",
+              "%5s %5s %5s %9s %6s %5s %-5s %s\n",
               "id", "kind", "disp/fr", "invoc/fr", "est%", "meas ms/fr",
-              "meas%", "cyc", "inst", "gprs", "thr", "loop", "spil", "wg",
-              "stage", "spirv");
+              "meas%", "cyc", "inst", "gprs", "thr", "loop", "spill:fill",
+              "scrat", "wg", "stage", "spirv");
 
       for (unsigned i = 0; i < MIN2(n, 20); ++i) {
          struct hk_gputime_shader *e = &live[i];
@@ -465,7 +483,7 @@ hk_gputime_report_shaders(struct hk_gputime *gt, uint64_t frames, double hz)
 
          fprintf(stderr,
                  "[hk gputime]     %-4u %-5s %8.1f %10.0f %7.1f%% %9.2f %6.1f%%"
-                 "  %5llu %5u %5u %5u %5u %5u %5u %-5s %s%s\n",
+                 "  %5llu %5u %5u %5u %5u %4u:%-4u %6u %5u %-5s %s%s\n",
                  e->id, hk_disp_kind_name(e->kind),
                  e->dispatches * per_frame, e->threads * per_frame,
                  total_cycles ? 100.0 * cost / total_cycles : 0.0,
@@ -480,7 +498,14 @@ hk_gputime_report_shaders(struct hk_gputime *gt, uint64_t frames, double hz)
                   * anything -- measured locally at 2894 us for a single
                   * 32-invocation dispatch with a data-dependent loop
                   * (tests/cstest.c). */
-                 in->stats.loops, in->stats.spills + in->stats.fills,
+                 in->stats.loops, in->stats.spills, in->stats.fills,
+                 /* Scratch is private memory the shader addresses indirectly.
+                  * It is reported separately from spill/fill because the two
+                  * have the same symptom -- memory traffic per invocation the
+                  * static cycle estimate is blind to -- but completely
+                  * different cures: spills want less register pressure,
+                  * scratch wants the indirectly-indexed array gone. */
+                 in->stats.scratch,
                  in->workgroup_size[0] * in->workgroup_size[1] *
                     in->workgroup_size[2],
                  _mesa_shader_stage_to_abbrev(in->stage), blake,
@@ -638,6 +663,16 @@ hk_gputime_report(struct hk_device *dev, uint64_t now_ns)
               cnt[HK_GPUTIME_COMP] ? (double)gt->dispatches / cnt[HK_GPUTIME_COMP] : 0.0,
               gt->dispatches ? (comp_ms * 1000.0) / gt->dispatches : 0.0,
               (unsigned long long)gt->draws);
+      fprintf(stderr,
+              "[hk gputime]   pipeline barriers %llu (%.1f/frame): "
+              "%llu compute-only, %llu compute-only but gfx open, "
+              "%llu need the hammer\n",
+              (unsigned long long)gt->barriers,
+              gt->presents ? (double)gt->barriers / gt->presents : 0.0,
+              (unsigned long long)gt->barriers_compute,
+              (unsigned long long)gt->barriers_gfx_open,
+              (unsigned long long)(gt->barriers - gt->barriers_compute -
+                                   gt->barriers_gfx_open));
    }
 
    double busy_ms = (busy / hz) * 1000.0;
@@ -663,6 +698,9 @@ hk_gputime_report(struct hk_device *dev, uint64_t now_ns)
    gt->presents = 0;
    gt->dispatches = 0;
    gt->draws = 0;
+   gt->barriers = 0;
+   gt->barriers_compute = 0;
+   gt->barriers_gfx_open = 0;
    memset(gt->disp_kind, 0, sizeof(gt->disp_kind));
    gt->report_start_ns = now_ns;
 }
