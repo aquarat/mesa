@@ -610,12 +610,45 @@ hk_gputime_report(struct hk_device *dev, uint64_t now_ns)
     */
    qsort(iv, n, sizeof(*iv), cmp_interval);
 
-   uint64_t busy = 0;
+   /* Walk the merged intervals, and while doing so measure the GAPS between
+    * them -- the stretches where the GPU had nothing running at all.
+    *
+    * "GPU busy 78.6%" says a fifth of the frame is idle but not why, and the
+    * two candidate answers want opposite fixes. Many small gaps means the
+    * pipeline is being drained repeatedly -- control stream boundaries, of
+    * which this game has ~137 per frame -- and the fix is to stop ending
+    * streams. A few large gaps means the CPU is not feeding the GPU, and the
+    * fix is somewhere in submission or in the game's own pacing.
+    *
+    * The histogram is coarse on purpose: the distinction above only needs
+    * orders of magnitude.
+    */
+   uint64_t busy = 0, idle = 0, idle_max = 0;
+   uint32_t gaps = 0;
+   uint32_t gap_hist[4] = {0}; /* <10us, <100us, <1ms, >=1ms */
+   uint64_t gap_time[4] = {0};
+   uint64_t prev_end = 0;
+   bool have_prev = false;
+
    for (unsigned i = 0; i < n;) {
       uint64_t s = iv[i].start, e = iv[i].end;
       unsigned j = i + 1;
       for (; j < n && iv[j].start <= e; ++j)
          e = MAX2(e, iv[j].end);
+
+      if (have_prev && s > prev_end) {
+         uint64_t g = s - prev_end;
+         double us = (g / hz) * 1.0e6;
+         unsigned b = us < 10.0 ? 0 : us < 100.0 ? 1 : us < 1000.0 ? 2 : 3;
+         gap_hist[b]++;
+         gap_time[b] += g;
+         idle += g;
+         idle_max = MAX2(idle_max, g);
+         gaps++;
+      }
+      prev_end = e;
+      have_prev = true;
+
       busy += e - s;
       i = j;
    }
@@ -680,6 +713,21 @@ hk_gputime_report(struct hk_device *dev, uint64_t now_ns)
            "[hk gputime]   GPU busy (union) %.1f ms = %.1f%% of wall%s\n",
            busy_ms, wall_ms > 0 ? 100.0 * busy_ms / wall_ms : 0.0,
            gt->skipped ? "" : "");
+   if (gaps) {
+      static const char *gap_names[4] = {"<10us", "<100us", "<1ms", ">=1ms"};
+      fprintf(stderr,
+              "[hk gputime]   GPU idle %.1f ms in %u gaps (%.1f/frame, "
+              "largest %.0f us)\n",
+              (idle / hz) * 1000.0, gaps,
+              gt->presents ? (double)gaps / gt->presents : 0.0,
+              (idle_max / hz) * 1.0e6);
+      fprintf(stderr, "[hk gputime]     ");
+      for (unsigned b = 0; b < 4; ++b) {
+         fprintf(stderr, "%s %u (%.1f ms)%s", gap_names[b], gap_hist[b],
+                 (gap_time[b] / hz) * 1000.0, b == 3 ? "\n" : "   ");
+      }
+   }
+
    if (gt->skipped) {
       fprintf(stderr,
               "[hk gputime]   %llu command(s) not profiled "
