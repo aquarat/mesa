@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "util/simple_mtx.h"
 #include "agx_compile.h"
 #include "util/mesa-blake3.h"
 #include "asahi/clc/asahi_clc.h"
@@ -3369,6 +3370,10 @@ static __thread FILE *agx_dump_out;
  */
 static __thread unsigned agx_dump_flags;
 
+/* Serialises the whole compile of a shader matched by AGX_DUMP_SHADER, so
+ * concurrent pipeline compiles cannot interleave their dumps on stderr. */
+static simple_mtx_t agx_dump_lock = SIMPLE_MTX_INITIALIZER;
+
 static FILE *
 agx_dump_stream(void)
 {
@@ -3794,7 +3799,17 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
    agx_dump_out = NULL;
    agx_dump_flags = 0;
 
-   if (unlikely(agx_shader_requested_by_hash(nir))) {
+   bool dumping = unlikely(agx_shader_requested_by_hash(nir));
+
+   /* Dumps go to stderr from whichever thread is compiling, and pipeline
+    * compiles run many at a time. Without this lock two matched shaders
+    * interleave line by line and splice mid-line -- observed producing
+    * "%6 = imadshl_agx %4.x, %5 (0x40), %0.x, shader: MESA_SHADER_COMPUTE".
+    * Serialise the whole compile of a matched shader, which is fine: this is
+    * a debug path that by construction runs for a handful of shaders.
+    */
+   if (dumping) {
+      simple_mtx_lock(&agx_dump_lock);
       char hex[BLAKE3_HEX_LEN];
       _mesa_blake3_format(hex, nir->info.source_blake3);
       fprintf(stderr, "\n=== AGX_DUMP_SHADER match: %s (%s) ===\n", hex,
@@ -3963,4 +3978,11 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
 
    out->binary = binary.data;
    info->binary_size = binary.size;
+
+   if (dumping) {
+      fflush(stderr);
+      agx_dump_out = NULL;
+      agx_dump_flags = 0;
+      simple_mtx_unlock(&agx_dump_lock);
+   }
 }
