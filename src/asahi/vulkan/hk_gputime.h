@@ -100,6 +100,7 @@ struct hk_gputime {
    uint64_t report_start_ns;
    uint64_t report_period_ns;
    uint64_t skipped;      /* commands whose end slot the app had claimed */
+   uint64_t presents;     /* frames delivered, counted at vkQueuePresentKHR */
 };
 
 void hk_gputime_init(struct hk_device *dev);

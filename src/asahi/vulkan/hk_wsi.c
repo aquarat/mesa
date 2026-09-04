@@ -5,8 +5,13 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_wsi.h"
+#include "hk_entrypoints.h"
+#include "hk_device.h"
 #include "hk_instance.h"
+#include "hk_physical_device.h"
+#include "hk_queue.h"
 #include "wsi_common.h"
+#include "util/u_atomic.h"
 
 #include <xf86drm.h>
 
@@ -66,4 +71,31 @@ hk_finish_wsi(struct hk_physical_device *pdev)
 {
    pdev->vk.wsi_device = NULL;
    wsi_device_finish(&pdev->wsi_device, &pdev->vk.instance->alloc);
+}
+
+/*
+ * Overriding the common entrypoint purely to count frames. Nothing else on
+ * Asahi can tell us the frame rate once the FEX Vulkan thunk is active: an
+ * x86-64 MangoHud is loaded by the guest loader, which the thunk replaces, and
+ * the host-side aarch64 MangoHud is not visible inside the pressure-vessel
+ * mount namespace. Counting presents in the driver sidesteps both problems and
+ * puts the frame rate in the same report as the GPU timing it has to be read
+ * against.
+ */
+VKAPI_ATTR VkResult VKAPI_CALL
+hk_QueuePresentKHR(VkQueue _queue, const VkPresentInfoKHR *pPresentInfo)
+{
+   struct vk_queue *vk_queue = vk_queue_from_handle(_queue);
+   struct hk_queue *queue = container_of(vk_queue, struct hk_queue, vk);
+   struct hk_device *dev = hk_queue_device(queue);
+
+   VkResult result = wsi_common_queue_present(
+      &hk_device_physical(dev)->wsi_device, &queue->vk, pPresentInfo);
+
+   /* SUBOPTIMAL still put a frame on screen. */
+   if (dev->gputime.enabled &&
+       (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR))
+      p_atomic_inc(&dev->gputime.presents);
+
+   return result;
 }
