@@ -28,6 +28,7 @@
 #include <xf86drm.h>
 #include "util/list.h"
 #include "util/macros.h"
+#include "util/u_atomic.h"
 #include "util/u_dynarray.h"
 #include "vulkan/vulkan_core.h"
 
@@ -89,6 +90,25 @@ asahi_fill_cdm_command(struct hk_device *dev, struct hk_cs *cs,
       .ts.end.handle = cs->timestamp.end.handle,
       .ts.end.offset = cs->timestamp.end.offset_B,
    };
+
+   /* Claim the timestamp pair for profiling, unless a real vkCmdWriteTimestamp
+    * already owns the end slot -- the app's query always wins.
+    */
+   if (dev->gputime.enabled) {
+      if (cs->timestamp.end.handle) {
+         p_atomic_inc(&dev->gputime.skipped);
+      } else {
+         int blk = hk_gputime_reserve(dev);
+         if (blk >= 0) {
+            cmd->ts.start.handle = dev->gputime.handle;
+            cmd->ts.start.offset =
+               hk_gputime_offset(blk, HK_GPUTIME_SLOT_COMP_START);
+            cmd->ts.end.handle = dev->gputime.handle;
+            cmd->ts.end.offset =
+               hk_gputime_offset(blk, HK_GPUTIME_SLOT_COMP_END);
+         }
+      }
+   }
 
    if (cs->uses_sampler_heap) {
       cmd->sampler_heap = dev->samplers.table.bo->va->addr;
@@ -217,6 +237,31 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
    if (cs->timestamp.end.handle) {
       c->ts_frag.end.handle = cs->timestamp.end.handle;
       c->ts_frag.end.offset = cs->timestamp.end.offset_B;
+   }
+
+   /* The vertex pair is never contended, so it is always profiled. The fragment
+    * pair is only ours when the app has not claimed the end slot for a query.
+    */
+   if (dev->gputime.enabled) {
+      int blk = hk_gputime_reserve(dev);
+      if (blk >= 0) {
+         c->ts_vtx.start.handle = dev->gputime.handle;
+         c->ts_vtx.start.offset =
+            hk_gputime_offset(blk, HK_GPUTIME_SLOT_VTX_START);
+         c->ts_vtx.end.handle = dev->gputime.handle;
+         c->ts_vtx.end.offset = hk_gputime_offset(blk, HK_GPUTIME_SLOT_VTX_END);
+
+         if (cs->timestamp.end.handle) {
+            p_atomic_inc(&dev->gputime.skipped);
+         } else {
+            c->ts_frag.start.handle = dev->gputime.handle;
+            c->ts_frag.start.offset =
+               hk_gputime_offset(blk, HK_GPUTIME_SLOT_FRAG_START);
+            c->ts_frag.end.handle = dev->gputime.handle;
+            c->ts_frag.end.offset =
+               hk_gputime_offset(blk, HK_GPUTIME_SLOT_FRAG_END);
+         }
+      }
    }
 }
 
@@ -878,6 +923,8 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
       result = queue_submit_looped(dev, &submit_ioctl, command_count,
                                    queue->drm.virt_ring_idx);
    }
+
+   hk_gputime_tick(dev);
 
    util_dynarray_fini(&payload);
    return result;

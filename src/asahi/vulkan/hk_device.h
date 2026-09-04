@@ -21,6 +21,7 @@
 #include "hk_private.h"
 
 #include "hk_descriptor_table.h"
+#include "hk_gputime.h"
 #include "hk_queue.h"
 #include "vk_device.h"
 #include "vk_meta.h"
@@ -99,6 +100,9 @@ struct hk_device {
 
    uint32_t perftest;
 
+   /* Firmware GPU timing, HK_GPUTIME=<seconds>. Off unless asked for. */
+   struct hk_gputime gputime;
+
    struct {
       struct u_rwlock lock;
       struct util_dynarray list;
@@ -115,6 +119,7 @@ enum hk_perftest {
    HK_PERF_BATCH = BITFIELD_BIT(3),
    HK_PERF_NOROBUST = BITFIELD_BIT(4),
    HK_PERF_FORCEBARRIER = BITFIELD_BIT(5),
+   HK_PERF_NOFLUSH = BITFIELD_BIT(6),
 };
 
 #define HK_PERF(dev, flag) unlikely((dev)->perftest &HK_PERF_##flag)
