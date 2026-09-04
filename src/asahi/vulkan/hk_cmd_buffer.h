@@ -358,6 +358,14 @@ struct hk_cs {
    /* Whether there is more than just the root chunk */
    bool stream_linked;
 
+   /* Which shader's dispatches this control stream holds, for GPU-time
+    * attribution. The firmware timestamps a whole control stream, so a stream
+    * can only be charged to a shader if every dispatch in it came from that
+    * one. HK_GPUTIME_MIXED marks a stream with dispatches from more than one,
+    * which is then simply not attributed rather than attributed wrongly.
+    */
+   const struct agx_shader_info *gputime_shader;
+
    /* Whether the sampler heap is required. Although we always must maintain the
     * heap for correctness, it's often not necessary since we can push lots of
     * samplers (especially for GL/DX11-era engines).

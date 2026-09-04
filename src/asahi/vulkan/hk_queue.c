@@ -101,6 +101,7 @@ asahi_fill_cdm_command(struct hk_device *dev, struct hk_cs *cs,
          p_atomic_inc(&dev->gputime.skipped);
       } else {
          int blk = hk_gputime_reserve(dev);
+         hk_gputime_set_block_owner(dev, blk, cs->gputime_shader);
          if (blk >= 0) {
             cmd->ts.start.handle = dev->gputime.handle;
             cmd->ts.start.offset =

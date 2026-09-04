@@ -784,6 +784,9 @@ hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
                   : (uint64_t)grid.count[0] * grid.count[1] * grid.count[2];
 
       hk_gputime_note_precomp(dev, idx, threads, indirect);
+
+      /* Helper-kernel work is not attributable to any application shader. */
+      cs->gputime_shader = HK_GPUTIME_MIXED;
    }
 
    hk_dispatch_with_usc_launch(dev, cs, prog->b.launch,

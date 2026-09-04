@@ -81,6 +81,28 @@ hk_EnumerateInstanceExtensionProperties(const char *pLayerName,
 static void
 hk_init_dri_options(struct hk_instance *instance)
 {
+   /* The whole vkd3d/DXVK profile in 00-hk-defaults.conf -- including the three
+    * options that decide the reported D3D feature level -- is selected purely
+    * by engine name. If the name does not arrive, the game silently gets
+    * FL11_0 and no amount of fixing the config file helps, so make it
+    * observable: HK_DEBUG_DRIRC=1 prints what actually reached the driver.
+    *
+    * This matters here because the game reaches this driver through the FEX
+    * Vulkan thunk, which has to marshal pApplicationInfo and its strings across
+    * the x86-64/aarch64 boundary -- a place where a dropped pointer would be
+    * invisible in every other respect.
+    */
+   if (getenv("HK_DEBUG_DRIRC")) {
+      fprintf(stderr,
+              "[hk drirc] app=\"%s\" (v%u)  engine=\"%s\" (v%u)  "
+              "DRIRC_CONFIGDIR=%s\n",
+              instance->vk.app_info.app_name ?: "(null)",
+              instance->vk.app_info.app_version,
+              instance->vk.app_info.engine_name ?: "(null)",
+              instance->vk.app_info.engine_version,
+              getenv("DRIRC_CONFIGDIR") ?: "(unset)");
+   }
+
    hk_parse_dri_options(&instance->drirc,
                         &(driConfigFileParseParams) {
                            .driverName = "hk",
@@ -89,6 +111,16 @@ hk_init_dri_options(struct hk_instance *instance)
                            .engineName = instance->vk.app_info.engine_name,
                            .engineVersion = instance->vk.app_info.engine_version,
                         });
+
+   if (getenv("HK_DEBUG_DRIRC")) {
+      fprintf(stderr,
+              "[hk drirc] -> vertex_pipeline_stores_atomics=%d fake_minmax=%d "
+              "image_view_min_lod=%d disable_border_emulation=%d\n",
+              instance->drirc.misc.enable_vertex_pipeline_stores_atomics,
+              instance->drirc.misc.fake_minmax,
+              instance->drirc.misc.image_view_min_lod,
+              instance->drirc.misc.disable_border_emulation);
+   }
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
