@@ -177,6 +177,14 @@ struct hk_gputime {
     */
    uint64_t disp_recorded;
 
+   /* CDM commands actually built at submit. Compared against the number of
+    * harvested compute intervals, this says whether timestamps are being lost
+    * between command creation and harvest -- which decides whether per-command
+    * attribution means anything.
+    */
+   uint64_t cdm_commands;
+   uint64_t cdm_timestamped;
+
    /* Set when HK_GPUTIME_ISOLATE=1: end the compute control stream after every
     * dispatch, so each one is timed individually. This perturbs -- it turns ~56
     * control streams per frame into ~1780 -- but a stream costs about 2 us to

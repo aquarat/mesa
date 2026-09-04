@@ -96,6 +96,7 @@ asahi_fill_cdm_command(struct hk_device *dev, struct hk_cs *cs,
     */
    if (dev->gputime.enabled) {
       p_atomic_add(&dev->gputime.dispatches, cs->stats.cmds);
+      p_atomic_inc(&dev->gputime.cdm_commands);
 
       if (cs->timestamp.end.handle) {
          p_atomic_inc(&dev->gputime.skipped);
@@ -103,6 +104,7 @@ asahi_fill_cdm_command(struct hk_device *dev, struct hk_cs *cs,
          int blk = hk_gputime_reserve(dev);
          hk_gputime_set_block_owner(dev, blk, cs->gputime_shader);
          if (blk >= 0) {
+            p_atomic_inc(&dev->gputime.cdm_timestamped);
             cmd->ts.start.handle = dev->gputime.handle;
             cmd->ts.start.offset =
                hk_gputime_offset(blk, HK_GPUTIME_SLOT_COMP_START);

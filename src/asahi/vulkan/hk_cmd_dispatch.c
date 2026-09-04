@@ -128,6 +128,15 @@ hk_dispatch_with_usc(struct hk_device *dev, struct hk_cs *cs,
     * pre_gfx/post_gfx are ordered against a graphics command and splitting them
     * would change what runs when.
     */
+   /* NOTE: this ends the control stream and a fresh one is created for the next
+    * dispatch -- verified, the hk_cs pointers differ -- but it does NOT produce
+    * one submitted command per dispatch. Measured with 1216 dispatches: 13 CDM
+    * commands built. Something downstream coalesces them, so per-dispatch
+    * timing is not achieved by splitting here and the attribution stays at
+    * ~101 dispatches per timed command. Left in place, and reported honestly by
+    * the "CDM commands built / timestamped / intervals harvested" line, until
+    * the coalescing is understood.
+    */
    if (unlikely(dev->gputime.isolate) && cs->cmd &&
        cs == cs->cmd->current_cs.cs) {
       hk_cmd_buffer_end_compute(cs->cmd);
