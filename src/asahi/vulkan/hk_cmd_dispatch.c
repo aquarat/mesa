@@ -41,6 +41,61 @@ hk_cmd_bind_compute_shader(struct hk_cmd_buffer *cmd,
    cmd->state.cs.shader = shader;
 }
 
+/*
+ * A CDM barrier with only the bits we ask for.
+ *
+ * agx_cdm_barrier() (libagx_dgc.h:372) sets every bit of the 23-bit barrier
+ * word after EVERY launch, under a comment saying the bits are not understood
+ * and this is "to be safe". That is why consecutive dispatches never overlap,
+ * and it costs dearly: this GPU needs ~4096 threads in flight to cover a
+ * 428-905 ns dependent load, and the game supplies ~213 per dispatch.
+ *
+ * Omitting the barrier entirely does not work -- it emits no barrier BLOCK at
+ * all, and the command stream appears to need one for sequencing even when no
+ * cache maintenance is wanted. That hangs the GPU (observed as
+ * "XIO: fatal IO error 110 (Connection timed out)" from the session's X server).
+ *
+ * So emit a real barrier block with a chosen subset of the cache bits.
+ * AGX_CDM_BARRIER_MASK sweeps that subset so the minimal correct set can be
+ * found by measurement rather than guessed. Bit 3 is USC cache invalidate, the
+ * only one genxml names; 0-20 are the rest.
+ */
+static void
+hk_cdm_barrier_masked(struct hk_device *dev, struct hk_cs *cs, uint32_t mask)
+{
+   assert(cs->type == HK_CS_CDM);
+   assert(cs->current + AGX_CDM_BARRIER_LENGTH < cs->end &&
+          "caller must ensure space");
+
+   uint32_t *out = (uint32_t *)cs->current;
+   *out = (mask & 0x001FFFFFu) | (3u /* CDM Block Type: Barrier */ << 29);
+   cs->current = (uint8_t *)cs->current + AGX_CDM_BARRIER_LENGTH;
+   cs->stats.flushes++;
+}
+
+static uint32_t
+hk_overlap_max(struct hk_device *dev)
+{
+   if (unlikely(!dev->overlap_max_valid)) {
+      const char *e = getenv("AGX_OVERLAP_MAX");
+      dev->overlap_max = e ? (uint32_t)strtoul(e, NULL, 0) : 0u;
+      dev->overlap_max_valid = true;
+   }
+   return dev->overlap_max;
+}
+
+/* Cached so the sweep costs one getenv per device, not one per dispatch. */
+static uint32_t
+hk_weak_barrier_mask(struct hk_device *dev)
+{
+   if (unlikely(!dev->weak_barrier_mask_valid)) {
+      const char *e = getenv("AGX_CDM_BARRIER_MASK");
+      dev->weak_barrier_mask = e ? (uint32_t)strtoul(e, NULL, 0) : 0u;
+      dev->weak_barrier_mask_valid = true;
+   }
+   return dev->weak_barrier_mask;
+}
+
 void
 hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
 {
@@ -59,6 +114,23 @@ hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
                             struct agx_workgroup wg, enum agx_barrier barrier)
 {
    hk_ensure_cs_has_space(cs->cmd, cs, 0x2000 /* TODO */);
+
+   /* Settle any deferred flush before a dispatch that is NOT overlappable.
+    * Skipping the flush between two application dispatches is legal -- Vulkan
+    * orders them only through a barrier, which ends the stream. It is not legal
+    * to let the driver's own helper kernels, or an indirect dispatch reading a
+    * GPU-written grid, observe writes that were never flushed. A garbage
+    * indirect grid is not a wrong pixel, it is a dispatch of billions of
+    * workgroups, which is how the blanket version hung the GPU.
+    */
+   if (unlikely(cs->pending_flush) &&
+       ((barrier & AGX_BARRIER_ALL) || agx_is_indirect(grid))) {
+      hk_cdm_cache_flush(dev, cs);
+      cs->pending_flush = false;
+      cs->weak_run = 0;
+      hk_ensure_cs_has_space(cs->cmd, cs, 0x2000 /* TODO */);
+   }
+
    cs->stats.cmds++;
 
    cs->current =
@@ -82,6 +154,27 @@ hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
 
    if ((barrier & AGX_BARRIER_ALL) || HK_PERF(dev, FORCEBARRIER))
       hk_cdm_cache_flush(dev, cs);
+   else if (HK_PERF(dev, OVERLAP)) {
+      /* Still emit a barrier BLOCK, just a weak one: the stream seems to need
+       * the block for sequencing, and the cache bits are what serialise.
+       *
+       * AGX_OVERLAP_MAX bounds how many dispatches may go by on a weak barrier
+       * before a full one is forced. It exists to bisect a failure: if the game
+       * survives a depth of 8 but not 64, the trouble is how long writes stay
+       * unflushed, not the idea of overlapping at all. 0 (the default) means
+       * unbounded.
+       */
+      hk_cdm_barrier_masked(dev, cs, hk_weak_barrier_mask(dev));
+      cs->pending_flush = true;
+      cs->weak_run++;
+
+      uint32_t cap = hk_overlap_max(dev);
+      if (cap && cs->weak_run >= cap) {
+         hk_cdm_cache_flush(dev, cs);
+         cs->pending_flush = false;
+         cs->weak_run = 0;
+      }
+   }
 }
 
 void
@@ -180,7 +273,16 @@ dispatch(struct hk_cmd_buffer *cmd, struct agx_grid grid)
     * without this they would be indistinguishable from the application's own
     * compute -- and mislabelled as it.
     */
-   hk_dispatch_with_local_size(cmd, cs, s, grid, local_size, AGX_BARRIER_ALL,
+   /* Dispatches not separated by a barrier or event may run concurrently per
+    * Vulkan, and hk_CmdPipelineBarrier2 ends the control stream when ordering
+    * is actually requested -- so the per-dispatch flush is not what provides
+    * that ordering, it only prevents overlap. See HK_PERF_OVERLAP.
+    */
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   enum agx_barrier barrier =
+      HK_PERF(dev, OVERLAP) ? AGX_BARRIER_NONE : AGX_BARRIER_ALL;
+
+   hk_dispatch_with_local_size(cmd, cs, s, grid, local_size, barrier,
                                cmd->in_meta ? HK_DISP_META : HK_DISP_APP);
    cs->stats.calls++;
 }
