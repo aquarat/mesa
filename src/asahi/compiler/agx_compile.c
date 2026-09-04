@@ -6,6 +6,7 @@
  */
 
 #include "agx_compile.h"
+#include "util/mesa-blake3.h"
 #include "asahi/clc/asahi_clc.h"
 #include "asahi/isa/disasm.h"
 #include "asahi/layout/layout.h"
@@ -3326,6 +3327,20 @@ agx_remove_unreachable_blocks(agx_context *ctx)
    } while (progress);
 }
 
+/*
+ * Where shader dumps go. Normally stdout, matching AGX_MESA_DEBUG=shaders. But
+ * a game's stdout is routinely discarded -- Proton captures stderr into its log
+ * and drops stdout entirely -- so a targeted dump would produce nothing to read.
+ * Thread-local because pipeline compiles run in parallel.
+ */
+static __thread FILE *agx_dump_out;
+
+static FILE *
+agx_dump_stream(void)
+{
+   return agx_dump_out ? agx_dump_out : stdout;
+}
+
 static bool
 agx_should_dump(nir_shader *nir, unsigned agx_dbg_bit)
 {
@@ -3426,14 +3441,14 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    AGX_PASS(ctx, agx_dce, true);
 
    if (agx_should_dump(nir, AGX_DBG_SHADERS))
-      agx_print_shader(ctx, stdout);
+      agx_print_shader(ctx, agx_dump_stream());
 
    if (likely(!(agx_compiler_debug & AGX_DBG_NOSCHED))) {
       AGX_PASS(ctx, agx_pressure_schedule);
    }
 
    if (agx_should_dump(nir, AGX_DBG_SHADERS))
-      agx_print_shader(ctx, stdout);
+      agx_print_shader(ctx, agx_dump_stream());
 
    AGX_PASS(ctx, agx_ra);
    agx_lower_64bit_postra(ctx);
@@ -3483,7 +3498,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    agx_opt_register_cache(ctx);
 
    if (agx_should_dump(nir, AGX_DBG_SHADERS))
-      agx_print_shader(ctx, stdout);
+      agx_print_shader(ctx, agx_dump_stream());
 
    /* Upload constants before the binary instead after to reduce the chance they
     * get prefetched into the i-cache, when we want them only in the d-cache.
@@ -3534,7 +3549,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
 #endif
 
    if (dump_shaders || selftest) {
-      FILE *fp = selftest ? fopen("/dev/null", "w") : stdout;
+      FILE *fp = selftest ? fopen("/dev/null", "w") : agx_dump_stream();
       bool errors =
          agx2_disassemble(binary->data + offset, binary->size - offset, fp);
 
@@ -3701,11 +3716,56 @@ lower_printf_buffer(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *_)
    return true;
 }
 
+/*
+ * AGX_MESA_DEBUG=shaders dumps every shader a game compiles, which for a title
+ * like this is hundreds of megabytes of NIR and disassembly with no way to tell
+ * which blob is which -- the disassembly carries no identifier, only the NIR
+ * header above it does.
+ *
+ * A profiler that reports per-shader GPU time can name the shaders that matter,
+ * by the source_blake3 in that same header. So allow asking for exactly those:
+ *
+ *   AGX_DUMP_SHADER=2e4ccbe89b31,e4919730b5b4
+ *
+ * Entries are hash prefixes, comma separated, matched case-insensitively.
+ */
+static bool
+agx_shader_requested_by_hash(const nir_shader *nir)
+{
+   const char *want = getenv("AGX_DUMP_SHADER");
+   if (!want || !want[0])
+      return false;
+
+   char hex[BLAKE3_HEX_LEN];
+   _mesa_blake3_format(hex, nir->info.source_blake3);
+
+   for (const char *p = want; *p;) {
+      size_t len = strcspn(p, ",");
+      if (len && len <= strlen(hex) && !strncasecmp(p, hex, len))
+         return true;
+      p += len;
+      if (*p == ',')
+         p++;
+   }
+   return false;
+}
+
 void
 agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
                        struct agx_shader_part *out)
 {
    agx_compiler_debug = agx_get_compiler_debug();
+   agx_dump_out = NULL;
+
+   if (unlikely(agx_shader_requested_by_hash(nir))) {
+      char hex[BLAKE3_HEX_LEN];
+      _mesa_blake3_format(hex, nir->info.source_blake3);
+      fprintf(stderr, "\n=== AGX_DUMP_SHADER match: %s (%s) ===\n", hex,
+              _mesa_shader_stage_to_abbrev(nir->info.stage));
+      agx_compiler_debug |= AGX_DBG_SHADERS | AGX_DBG_SHADERDB;
+      agx_dump_out = stderr;
+   }
+
    struct agx_shader_info *info = &out->info;
 
    struct util_dynarray binary = UTIL_DYNARRAY_INIT;
@@ -3789,7 +3849,7 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
    }
 
    if (agx_should_dump(nir, AGX_DBG_SHADERS))
-      nir_print_shader(nir, stdout);
+      nir_print_shader(nir, agx_dump_stream());
 
    info->local_size = nir->info.shared_size;
 

@@ -626,6 +626,11 @@ hk_gputime_report(struct hk_device *dev, uint64_t now_ns)
               (unsigned long long)gt->disp_kind[HK_DISP_PRECOMP],
               (unsigned long long)gt->disp_recorded);
       fprintf(stderr,
+              "[hk gputime]   CDM commands built %llu, timestamped %llu, "
+              "intervals harvested %u  <- these should agree\n",
+              (unsigned long long)gt->cdm_commands,
+              (unsigned long long)gt->cdm_timestamped, cnt[HK_GPUTIME_COMP]);
+      fprintf(stderr,
               "[hk gputime]   %llu dispatches (%.1f/cmd, %.1f us each)  "
               "%llu draws\n",
               (unsigned long long)gt->dispatches,
@@ -651,6 +656,8 @@ hk_gputime_report(struct hk_device *dev, uint64_t now_ns)
    util_dynarray_clear(&gt->intervals);
    gt->skipped = 0;
    gt->disp_recorded = 0;
+   gt->cdm_commands = 0;
+   gt->cdm_timestamped = 0;
    gt->presents = 0;
    gt->dispatches = 0;
    gt->draws = 0;
