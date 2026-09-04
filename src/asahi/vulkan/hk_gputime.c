@@ -188,7 +188,9 @@ hk_gputime_report(struct hk_device *dev, uint64_t now_ns)
 
    static const char *names[HK_GPUTIME_KINDS] = {"vtx ", "frag", "comp"};
 
-   fprintf(stderr, "[hk gputime] %.2f s wall\n", wall_ms / 1000.0);
+   fprintf(stderr, "[hk gputime] %.2f s wall   %llu frames  %.1f fps\n",
+           wall_ms / 1000.0, (unsigned long long)gt->presents,
+           wall_ms > 0 ? gt->presents * 1000.0 / wall_ms : 0.0);
    for (unsigned k = 0; k < HK_GPUTIME_KINDS; ++k) {
       double ms = (sum[k] / hz) * 1000.0;
       fprintf(stderr,
@@ -212,6 +214,7 @@ hk_gputime_report(struct hk_device *dev, uint64_t now_ns)
 
    util_dynarray_clear(&gt->intervals);
    gt->skipped = 0;
+   gt->presents = 0;
    gt->report_start_ns = now_ns;
 }
 
