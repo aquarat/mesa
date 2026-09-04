@@ -101,6 +101,15 @@ hk_dispatch_with_usc(struct hk_device *dev, struct hk_cs *cs,
                   : (uint64_t)grid.count[0] * grid.count[1] * grid.count[2];
 
       hk_gputime_note_shader(dev, kind, info, threads, indirect);
+
+      /* Tag the stream so the firmware timestamp can be charged to a shader.
+       * A stream holding work from two different shaders is marked MIXED and
+       * simply not attributed, rather than attributed to whichever came first.
+       */
+      if (cs->gputime_shader == NULL)
+         cs->gputime_shader = info;
+      else if (cs->gputime_shader != info)
+         cs->gputime_shader = HK_GPUTIME_MIXED;
    }
 
    struct agx_cdm_launch_word_0_packed launch;
@@ -113,6 +122,16 @@ hk_dispatch_with_usc(struct hk_device *dev, struct hk_cs *cs,
    }
 
    hk_dispatch_with_usc_launch(dev, cs, launch, usc, grid, local_size, barrier);
+
+   /* HK_GPUTIME_ISOLATE: give every dispatch its own control stream so the
+    * firmware times it individually. Only the plain compute stream is split --
+    * pre_gfx/post_gfx are ordered against a graphics command and splitting them
+    * would change what runs when.
+    */
+   if (unlikely(dev->gputime.isolate) && cs->cmd &&
+       cs == cs->cmd->current_cs.cs) {
+      hk_cmd_buffer_end_compute(cs->cmd);
+   }
 }
 
 static void

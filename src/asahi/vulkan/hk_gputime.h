@@ -120,7 +120,18 @@ struct hk_gputime_shader {
    uint64_t dispatches;
    uint64_t indirect;                  /* dispatches with an indirect grid */
    uint64_t threads;                   /* invocations launched (direct only) */
+
+   /* MEASURED firmware GPU time for control streams that held only this
+    * shader, and how many such streams there were. This is the number the
+    * cycle estimate cannot produce: it includes memory stalls, spill traffic
+    * and everything else the static model is blind to.
+    */
+   uint64_t measured_ticks;
+   uint64_t measured_streams;
 };
+
+/* A control stream whose dispatches came from more than one shader. */
+#define HK_GPUTIME_MIXED ((const struct agx_shader_info *)(uintptr_t)1)
 
 struct hk_gputime_precomp {
    uint64_t dispatches;
@@ -166,6 +177,20 @@ struct hk_gputime {
     */
    uint64_t disp_recorded;
 
+   /* Set when HK_GPUTIME_ISOLATE=1: end the compute control stream after every
+    * dispatch, so each one is timed individually. This perturbs -- it turns ~56
+    * control streams per frame into ~1780 -- but a stream costs about 2 us to
+    * start (measured, tests/disptest.c) against the ~2400 us these streams
+    * actually take, so the ranking it produces is trustworthy even though the
+    * absolute frame time is not.
+    */
+   bool isolate;
+
+   /* Which shader owns the command that reserved each block, so a harvested
+    * interval can be charged to it. Indexed by block.
+    */
+   const struct agx_shader_info **block_shader;
+
    simple_mtx_t shader_lock; /* guards the two tables below */
    struct hk_gputime_shader shaders[HK_GPUTIME_MAX_SHADERS];
    uint32_t nr_shaders;
@@ -209,5 +234,9 @@ void hk_gputime_note_shader(struct hk_device *dev, enum hk_disp_kind kind,
 
 void hk_gputime_note_precomp(struct hk_device *dev, unsigned prog,
                              uint64_t threads, bool indirect);
+
+/* Record which shader owns the command that reserved this block. */
+void hk_gputime_set_block_owner(struct hk_device *dev, int blk,
+                                const struct agx_shader_info *info);
 
 #endif

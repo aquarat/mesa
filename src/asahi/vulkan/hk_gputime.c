@@ -63,6 +63,13 @@ hk_gputime_init(struct hk_device *dev)
    memset(gt->blocks, 0, size);
 
    gt->nr_blocks = HK_GPUTIME_BLOCKS;
+   gt->isolate = getenv("HK_GPUTIME_ISOLATE") != NULL;
+   gt->block_shader = calloc(gt->nr_blocks, sizeof(*gt->block_shader));
+   if (!gt->block_shader) {
+      agx_bo_unreference(&dev->dev, gt->bo);
+      gt->bo = NULL;
+      return;
+   }
    gt->report_period_ns = (uint64_t)(period_s * 1000000000.0);
    gt->last_scan_ns = gt->report_start_ns = os_time_get_nano();
    simple_mtx_init(&gt->lock, mtx_plain);
@@ -72,9 +79,20 @@ hk_gputime_init(struct hk_device *dev)
 
    fprintf(stderr,
            "[hk gputime] firmware GPU timing active, reporting every %.2f s "
-           "(timebase %llu Hz)\n",
+           "(timebase %llu Hz)%s\n",
            period_s,
-           (unsigned long long)dev->dev.params.command_timestamp_frequency_hz);
+           (unsigned long long)dev->dev.params.command_timestamp_frequency_hz,
+           gt->isolate ? "  [ISOLATE: one dispatch per control stream, "
+                         "absolute times are perturbed]" : "");
+}
+
+void
+hk_gputime_set_block_owner(struct hk_device *dev, int blk,
+                           const struct agx_shader_info *info)
+{
+   struct hk_gputime *gt = &dev->gputime;
+   if (gt->enabled && blk >= 0 && (uint32_t)blk < gt->nr_blocks)
+      gt->block_shader[blk] = info;
 }
 
 void
@@ -90,6 +108,8 @@ hk_gputime_finish(struct hk_device *dev)
    simple_mtx_destroy(&gt->shader_lock);
    agx_bo_unreference(&dev->dev, gt->bo);
    gt->bo = NULL;
+   free(gt->block_shader);
+   gt->block_shader = NULL;
 }
 
 /*
@@ -265,7 +285,7 @@ hk_gputime_reserve(struct hk_device *dev)
  */
 static void
 harvest(struct hk_gputime *gt, uint64_t *blk, unsigned s, unsigned e,
-        enum hk_gputime_kind kind)
+        enum hk_gputime_kind kind, uint32_t block_idx)
 {
    uint64_t start = blk[s], end = blk[e];
 
@@ -280,6 +300,27 @@ harvest(struct hk_gputime *gt, uint64_t *blk, unsigned s, unsigned e,
 
    struct hk_gputime_interval iv = {.start = start, .end = end, .kind = kind};
    util_dynarray_append(&gt->intervals, iv);
+
+   /* Charge the elapsed time to the shader that owned this control stream, if
+    * exactly one did. This is MEASURED time, so unlike the cycle estimate it
+    * includes memory stalls and spill traffic -- which is the whole reason a
+    * shader can dominate the frame while the estimate calls it a minority.
+    */
+   if (kind == HK_GPUTIME_COMP && gt->block_shader) {
+      const struct agx_shader_info *owner = gt->block_shader[block_idx];
+      gt->block_shader[block_idx] = NULL;
+
+      if (owner && owner != HK_GPUTIME_MIXED) {
+         simple_mtx_lock(&gt->shader_lock);
+         struct hk_gputime_shader *ent =
+            hk_gputime_shader_entry(gt, owner, HK_DISP_APP);
+         if (ent) {
+            ent->measured_ticks += end - start;
+            ent->measured_streams++;
+         }
+         simple_mtx_unlock(&gt->shader_lock);
+      }
+   }
 }
 
 /* lock held */
@@ -290,11 +331,11 @@ hk_gputime_scan(struct hk_gputime *gt)
       uint64_t *blk = gt->blocks + (size_t)b * HK_GPUTIME_SLOTS_PER_BLOCK;
 
       harvest(gt, blk, HK_GPUTIME_SLOT_VTX_START, HK_GPUTIME_SLOT_VTX_END,
-              HK_GPUTIME_VTX);
+              HK_GPUTIME_VTX, b);
       harvest(gt, blk, HK_GPUTIME_SLOT_FRAG_START, HK_GPUTIME_SLOT_FRAG_END,
-              HK_GPUTIME_FRAG);
+              HK_GPUTIME_FRAG, b);
       harvest(gt, blk, HK_GPUTIME_SLOT_COMP_START, HK_GPUTIME_SLOT_COMP_END,
-              HK_GPUTIME_COMP);
+              HK_GPUTIME_COMP, b);
    }
 }
 
@@ -336,6 +377,15 @@ static int
 cmp_shader_cost(const void *a, const void *b)
 {
    const struct hk_gputime_shader *x = a, *y = b;
+
+   /* Measured time beats the estimate whenever it exists: the estimate cannot
+    * see memory stalls, and a spilling shader is exactly where the two diverge.
+    */
+   if (x->measured_ticks || y->measured_ticks) {
+      if (x->measured_ticks != y->measured_ticks)
+         return x->measured_ticks > y->measured_ticks ? -1 : 1;
+   }
+
    uint64_t cx = x->threads * hk_shader_cycles_per_invocation(x->info);
    uint64_t cy = y->threads * hk_shader_cycles_per_invocation(y->info);
 
@@ -346,7 +396,7 @@ cmp_shader_cost(const void *a, const void *b)
 
 /* lock held */
 static void
-hk_gputime_report_shaders(struct hk_gputime *gt, uint64_t frames)
+hk_gputime_report_shaders(struct hk_gputime *gt, uint64_t frames, double hz)
 {
    double per_frame = frames ? 1.0 / (double)frames : 0.0;
 
@@ -359,7 +409,7 @@ hk_gputime_report_shaders(struct hk_gputime *gt, uint64_t frames)
     * trade for a table that is only ever touched under shader_lock. */
    static struct hk_gputime_shader live[HK_GPUTIME_MAX_SHADERS];
    unsigned n = 0;
-   uint64_t total_cycles = 0;
+   uint64_t total_cycles = 0, total_measured = 0;
 
    for (unsigned i = 0; i < HK_GPUTIME_MAX_SHADERS; ++i) {
       struct hk_gputime_shader *e = &gt->shaders[i];
@@ -368,6 +418,7 @@ hk_gputime_report_shaders(struct hk_gputime *gt, uint64_t frames)
 
       live[n++] = *e;
       total_cycles += e->threads * hk_shader_cycles_per_invocation(e->info);
+      total_measured += e->measured_ticks;
 
       /* Keep the identity and the id, drop the counts: the report is per
        * period, but a shader must keep the same id across periods to be
@@ -376,20 +427,24 @@ hk_gputime_report_shaders(struct hk_gputime *gt, uint64_t frames)
       e->dispatches = 0;
       e->indirect = 0;
       e->threads = 0;
+      e->measured_ticks = 0;
+      e->measured_streams = 0;
    }
 
    qsort(live, n, sizeof(*live), cmp_shader_cost);
 
    if (n) {
       fprintf(stderr,
-              "[hk gputime]   top compute shaders by estimated cost "
-              "(%u live, %.3f Gcycle total)\n",
-              n, total_cycles / 1.0e9);
+              "[hk gputime]   top compute shaders (%u live, %.3f Gcycle "
+              "estimated total, %.1f ms measured over %s streams)\n",
+              n, total_cycles / 1.0e9, (total_measured / hz) * 1000.0,
+              total_measured ? "single-shader" : "no");
       fprintf(stderr,
-              "[hk gputime]     %-4s %-5s %-8s %-10s %-8s  %5s %5s %5s %5s "
-              "%5s %5s %-5s %s\n",
-              "id", "kind", "disp/fr", "invoc/fr", "share", "cyc", "inst",
-              "gprs", "thr", "spil", "wg", "stage", "spirv");
+              "[hk gputime]     %-4s %-5s %-8s %-10s %-8s %9s %7s  %5s %5s "
+              "%5s %5s %5s %5s %5s %-5s %s\n",
+              "id", "kind", "disp/fr", "invoc/fr", "est%", "meas ms/fr",
+              "meas%", "cyc", "inst", "gprs", "thr", "loop", "spil", "wg",
+              "stage", "spirv");
 
       for (unsigned i = 0; i < MIN2(n, 20); ++i) {
          struct hk_gputime_shader *e = &live[i];
@@ -406,14 +461,26 @@ hk_gputime_report_shaders(struct hk_gputime *gt, uint64_t frames)
          _mesa_blake3_format(blake, in->source_blake3);
          blake[12] = '\0';
 
+         double meas_ms = (e->measured_ticks / hz) * 1000.0;
+
          fprintf(stderr,
-                 "[hk gputime]     %-4u %-5s %8.1f %10.0f %7.1f%%  %5llu "
-                 "%5u %5u %5u %5u %5u %-5s %s%s\n",
+                 "[hk gputime]     %-4u %-5s %8.1f %10.0f %7.1f%% %9.2f %6.1f%%"
+                 "  %5llu %5u %5u %5u %5u %5u %5u %-5s %s%s\n",
                  e->id, hk_disp_kind_name(e->kind),
                  e->dispatches * per_frame, e->threads * per_frame,
                  total_cycles ? 100.0 * cost / total_cycles : 0.0,
+                 meas_ms * per_frame,
+                 total_measured ? 100.0 * e->measured_ticks / total_measured
+                                : 0.0,
                  (unsigned long long)cyc, in->stats.instrs, in->stats.gprs,
-                 in->stats.threads, in->stats.spills + in->stats.fills,
+                 in->stats.threads,
+                 /* Hardware loop count. A shader with loops can execute
+                  * unboundedly more instructions than `inst` suggests, which is
+                  * exactly where the static cycle estimate stops meaning
+                  * anything -- measured locally at 2894 us for a single
+                  * 32-invocation dispatch with a data-dependent loop
+                  * (tests/cstest.c). */
+                 in->stats.loops, in->stats.spills + in->stats.fills,
                  in->workgroup_size[0] * in->workgroup_size[1] *
                     in->workgroup_size[2],
                  _mesa_shader_stage_to_abbrev(in->stage), blake,
@@ -579,7 +646,7 @@ hk_gputime_report(struct hk_device *dev, uint64_t now_ns)
               (unsigned long long)gt->skipped);
    }
 
-   hk_gputime_report_shaders(gt, gt->presents);
+   hk_gputime_report_shaders(gt, gt->presents, hz);
 
    util_dynarray_clear(&gt->intervals);
    gt->skipped = 0;
