@@ -1,0 +1,102 @@
+# Does the Honeykrisp driver in this fork still build?
+#
+# This fork exists to carry the Ghost of Tsushima work described at
+# https://github.com/aquarat/got-bringup. Its branches are rebased onto upstream
+# Mesa periodically, and a rebase is exactly when the driver changes here break:
+# they touch hk_cmd_dispatch, hk_cmd_buffer, hk_queue, hk_shader, poly's
+# tessellation lowering and nir_divergence_analysis, all of which move upstream.
+#
+# This builds ONLY the Asahi Vulkan driver, in the same configuration
+# got-bringup packages and deploys -- no GL, no gallium, no video codecs.
+# libvulkan_asahi.so is a self-contained ICD and is the whole of what ships.
+#
+# It cannot say whether the driver is CORRECT. Nothing without an Apple GPU can.
+# STATE.md in got-bringup lists what to re-check after a rebase, and the weak
+# CDM barrier is the item that will not fail loudly.
+
+name: asahi vulkan build
+
+on:
+  push:
+    paths:
+      - 'src/asahi/**'
+      - 'src/poly/**'
+      - 'src/compiler/nir/**'
+      - 'src/vulkan/**'
+      - 'meson.build'
+      - 'meson.options'
+      - '.github/workflows/asahi-vulkan-build.yml'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # aarch64, because that is the only architecture this driver is ever used on
+    # and a native build is the one whose failures mean something.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    container:
+      image: registry.fedoraproject.org/fedora:44
+
+    steps:
+      - name: Build dependencies
+        run: |
+          # pkgconfig() rather than package names wherever one exists: Fedora
+          # renames -devel packages between releases (zlib -> zlib-ng-compat is
+          # the recent one) and the pkgconfig provides survive that.
+          dnf -y install --setopt=install_weak_deps=False \
+            git-core gcc gcc-c++ meson ninja-build bison flex \
+            python3-devel python3-mako python3-ply python3-pyyaml python3-packaging \
+            'pkgconfig(libdrm)' 'pkgconfig(expat)' 'pkgconfig(zlib)' 'pkgconfig(libzstd)' \
+            'pkgconfig(x11)' 'pkgconfig(x11-xcb)' 'pkgconfig(xcb)' \
+            'pkgconfig(xcb-dri3)' 'pkgconfig(xcb-present)' 'pkgconfig(xcb-randr)' \
+            'pkgconfig(xcb-shm)' 'pkgconfig(xcb-sync)' 'pkgconfig(xcb-xfixes)' \
+            'pkgconfig(xcb-keysyms)' 'pkgconfig(xshmfence)' 'pkgconfig(xrandr)' \
+            'pkgconfig(wayland-client)' 'pkgconfig(wayland-scanner)' \
+            'pkgconfig(wayland-protocols)' \
+            llvm-devel clang-devel spirv-tools-devel spirv-llvm-translator-devel
+
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: |
+          git config --global --add safe.directory '*'
+          meson setup build \
+            --prefix=/usr --libdir=lib64 --buildtype=release \
+            -Dvulkan-drivers=asahi \
+            -Dgallium-drivers= \
+            -Dplatforms=x11,wayland \
+            -Dopengl=false -Dgles1=disabled -Dgles2=disabled \
+            -Dglx=disabled -Degl=disabled -Dgbm=disabled -Dglvnd=disabled \
+            -Dvideo-codecs= -Dtools= -Dvulkan-layers= \
+            -Dbuild-tests=false \
+            -Dllvm=enabled -Dshared-llvm=enabled \
+            -Dxmlconfig=enabled -Dshader-cache=enabled
+
+      - name: Build
+        run: ninja -C build
+
+      - name: The driver exists and links what it should
+        run: |
+          so=$(find build -name libvulkan_asahi.so | head -1)
+          test -n "$so"
+          ls -la "$so"
+          # An ICD with an unresolved symbol loads fine and then dies at the first
+          # call into the missing one, which reads as a driver bug rather than a
+          # link error. Catch it here instead.
+          if ldd -r "$so" 2>&1 | grep -i 'undefined symbol'; then
+            echo "unresolved symbols in $so" >&2
+            exit 1
+          fi
+          readelf -d "$so" | grep NEEDED
+          echo "so=$so" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libvulkan_asahi
+          path: ${{ env.so }}
+          if-no-files-found: error
+          retention-days: 14
