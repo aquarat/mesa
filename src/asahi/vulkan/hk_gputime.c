@@ -344,14 +344,15 @@ harvest(struct hk_gputime *gt, uint64_t *blk, unsigned s, unsigned e,
     * includes memory stalls and spill traffic -- which is the whole reason a
     * shader can dominate the frame while the estimate calls it a minority.
     */
-   if (kind == HK_GPUTIME_COMP && gt->block_shader) {
+   if ((kind == HK_GPUTIME_COMP || kind == HK_GPUTIME_FRAG) &&
+       gt->block_shader) {
       const struct agx_shader_info *owner = gt->block_shader[block_idx];
       gt->block_shader[block_idx] = NULL;
 
       if (owner && owner != HK_GPUTIME_MIXED) {
          simple_mtx_lock(&gt->shader_lock);
-         struct hk_gputime_shader *ent =
-            hk_gputime_shader_entry(gt, owner, HK_DISP_APP);
+         struct hk_gputime_shader *ent = hk_gputime_shader_entry(
+            gt, owner, kind == HK_GPUTIME_FRAG ? HK_DISP_FRAG : HK_DISP_APP);
          if (ent) {
             ent->measured_ticks += end - start;
             ent->measured_streams++;
@@ -381,7 +382,7 @@ static const char *
 hk_disp_kind_name(uint32_t kind)
 {
    static const char *n[HK_DISP_KINDS] = {"app", "meta", "gs", "tess",
-                                          "precomp"};
+                                          "precomp", "frag"};
    return kind < HK_DISP_KINDS ? n[kind] : "?";
 }
 

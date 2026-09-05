@@ -87,6 +87,7 @@ enum hk_disp_kind {
    HK_DISP_GS,        /* geometry shader / pre-rasterization, incl. VS-in-CS */
    HK_DISP_TESS,      /* tessellation emulation */
    HK_DISP_PRECOMP,   /* libagx helper kernels (clears, fills, prefix sums...) */
+   HK_DISP_FRAG,      /* not a dispatch: a draw, charged to its fragment shader */
    HK_DISP_KINDS,
 };
 

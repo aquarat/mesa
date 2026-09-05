@@ -251,6 +251,12 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
       p_atomic_add(&dev->gputime.draws, cs->stats.cmds);
 
       int blk = hk_gputime_reserve(dev);
+
+      /* The fragment shader that owned this render command, so the ts_frag
+       * interval can be charged to it. NULL or MIXED means several ran and
+       * the interval is not attributable, which harvest() handles. */
+      hk_gputime_set_block_owner(dev, blk, cs->gputime_shader);
+
       if (blk >= 0) {
          c->ts_vtx.start.handle = dev->gputime.handle;
          c->ts_vtx.start.offset =
