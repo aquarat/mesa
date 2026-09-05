@@ -183,6 +183,30 @@ hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev, nir_shader *nir)
    NIR_PASS(_, nir, nir_split_var_copies);
    NIR_PASS(_, nir, nir_split_struct_vars, nir_var_function_temp);
 
+   /* Move constant-initialised local arrays into the shader's constant data
+    * section, before agx_preprocess_nir() lowers anything over 256 bytes to
+    * scratch.
+    *
+    * ORDER IS THE WHOLE POINT. Scratch is PER-INVOCATION private memory, so an
+    * array that survives to scratch is rebuilt by every single invocation. In
+    * Ghost of Tsushima the hottest compute shader declares a 2560-byte
+    * constant table this way and emits 160 stores to fill it -- 514
+    * stack_stores in the final binary -- before reading it back through 44
+    * dynamically indexed loads, and it does that ~1.38 million times a frame.
+    * Running this pass after agx_preprocess_nir would find nothing left to
+    * move, which is why it has to be here and not next to hk's other
+    * optimisations.
+    *
+    * The pass asserts if it meets a copy_deref, so copies must be lowered
+    * first; that happens a few lines below in the original ordering, so do it
+    * here instead. nir_lower_var_copies is idempotent and agx_preprocess_nir
+    * runs it again anyway.
+    */
+   NIR_PASS(_, nir, nir_lower_var_copies);
+   NIR_PASS(_, nir, nir_lower_vars_to_ssa);
+   NIR_PASS(_, nir, nir_opt_large_constants, glsl_get_natural_size_align_bytes,
+            16);
+
    /* Optimize but allow copies because we haven't lowered them yet */
    agx_preprocess_nir(nir);
 
@@ -838,7 +862,10 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_push_const,
             nir_address_format_32bit_offset);
 
-   // NIR_PASS(_, nir, nir_opt_large_constants, NULL, 32);
+   /* nir_opt_large_constants runs in hk_preprocess_nir, not here: by this
+    * point agx_preprocess_nir has already lowered large arrays to scratch and
+    * there would be nothing left for it to find.
+    */
 
    /* Turn cache flushes into image coherency bits while we still have derefs */
    NIR_PASS(_, nir, nir_lower_memory_model);
@@ -949,6 +976,47 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
 static void
 hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
 {
+   /* Constant data section: read-only tables lifted out of per-invocation
+    * scratch by nir_opt_large_constants. Its own BO rather than a tail on the
+    * code BO, because that one is mapped executable and low-VA and this is
+    * neither; separating them also keeps preamble_offset arithmetic alone.
+    *
+    * Reached through this path on the compile route AND on the pipeline cache
+    * route, since hk_deserialize_shader() restores data_ptr and then calls
+    * here -- a cached shader must get its constants uploaded too.
+    */
+   if (shader->data_size > 0) {
+      /* A USC uniform packet loads the CONTENTS at an address into uniform
+       * registers -- it does not load the address itself. So the shader
+       * cannot be handed a pointer directly; there has to be somewhere in
+       * memory holding that pointer for the packet to read.
+       *
+       * Keep it self-contained by stashing the pointer in the same BO, just
+       * past the data, the same trick the root descriptor table plays with
+       * its self-referential first field. Layout:
+       *
+       *    [ constant data ][ pad to 8 ][ u64 pointing at offset 0 ]
+       *
+       * Data sits at offset 0 so it inherits the BO's page alignment, which
+       * is what lower_load_constant() relies on for its align_mul.
+       */
+      uint32_t ptr_offs = align(shader->data_size, 8);
+
+      shader->data_bo =
+         agx_bo_create(&dev->dev, ptr_offs + sizeof(uint64_t), 0, 0,
+                       "Shader constant data");
+      if (shader->data_bo) {
+         uint8_t *map = agx_bo_map(shader->data_bo);
+         uint64_t addr = shader->data_bo->va->addr;
+
+         memcpy(map, shader->data_ptr, shader->data_size);
+         memcpy(map + ptr_offs, &addr, sizeof(addr));
+
+         /* What the USC packet reads, not what the shader reads. */
+         shader->data_addr = addr + ptr_offs;
+      }
+   }
+
    if (shader->b.info.has_preamble || shader->b.info.rodata.size_16) {
       /* TODO: Do we wnat to compact? Revisit when we rework prolog/epilogs. */
       size_t size = shader->b.info.binary_size;
@@ -1000,6 +1068,47 @@ hk_init_link_ht(struct hk_shader *shader, mesa_shader_stage sw_stage)
 
    return (shader->linked.ht == NULL) ? VK_ERROR_OUT_OF_HOST_MEMORY
                                       : VK_SUCCESS;
+}
+
+/*
+ * Turn the load_constant intrinsics that nir_opt_large_constants leaves behind
+ * into ordinary global loads from this shader's constant data section.
+ *
+ * The section's address is not known when the shader is compiled -- the BO is
+ * allocated afterwards -- so the shader reads it from a uniform register,
+ * which hk_fast_link() binds once per linked variant. That costs one 64-bit
+ * uniform and nothing per dispatch.
+ */
+static bool
+lower_load_constant(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_constant)
+      return false;
+
+   unsigned unif = *(unsigned *)data;
+   b->cursor = nir_before_instr(&intr->instr);
+
+   nir_def *base = nir_load_preamble(b, 1, 64, .base = unif);
+   nir_def *offset =
+      nir_iadd_imm(b, nir_u2u64(b, intr->src[0].ssa), nir_intrinsic_base(intr));
+
+   /* Read-only for the lifetime of the shader and identical for every
+    * invocation, so it may be reordered and hoisted freely -- including into
+    * the preamble, where a uniform index makes it a single load for the whole
+    * workgroup rather than one per thread.
+    */
+   /* The section is allocated in its own BO, so it is at least page aligned;
+    * nir_opt_large_constants aligns each variable within it to that
+    * variable's own alignment. So the intrinsic's align_mul still holds
+    * against the final address, at align_offset 0.
+    */
+   nir_def *val = nir_load_global_constant(
+      b, intr->def.num_components, intr->def.bit_size,
+      nir_iadd(b, base, offset), .align_mul = nir_intrinsic_align_mul(intr),
+      .align_offset = 0, .access = ACCESS_CAN_SPECULATE);
+
+   nir_def_replace(&intr->def, val);
+   return true;
 }
 
 static bool
@@ -1169,6 +1278,20 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
    NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_uniforms,
             nir_metadata_control_flow, &root);
 
+   /* The constant data pointer sits immediately after the root descriptor and
+    * the descriptor sets, which is also where the compiler's own preamble
+    * allocation starts -- so claiming a slot here means reserving one more
+    * below.
+    */
+   unsigned const_data_unif = root + (4 * (1 + set_count));
+   bool has_const_data = nir->constant_data_size > 0;
+
+   if (has_const_data) {
+      shader->info.const_data_unif = const_data_unif;
+      NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_load_constant,
+               nir_metadata_control_flow, &const_data_unif);
+   }
+
 #if 0
    /* TODO */
    nir_variable_mode robust2_modes = 0;
@@ -1179,7 +1302,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
 #endif
 
    struct agx_shader_key backend_key = {
-      .reserved_preamble = root + (4 * (1 + set_count)),
+      .reserved_preamble = const_data_unif + (has_const_data ? 4 : 0),
       .dev = agx_gather_device_key(&dev->dev),
       .no_stop = nir->info.stage == MESA_SHADER_FRAGMENT,
       .has_scratch = !nir->info.internal,
@@ -1265,6 +1388,7 @@ hk_shader_destroy(struct hk_device *dev, struct hk_shader *s)
 {
    free((void *)s->code_ptr);
    free((void *)s->data_ptr);
+   agx_bo_unreference(&dev->dev, s->data_bo);
    agx_bo_unreference(&dev->dev, s->bo);
 
    simple_mtx_destroy(&s->linked.lock);
@@ -1855,6 +1979,15 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
 
    if (main && main->b.info.rodata.size_16) {
       agx_usc_immediates(&b, &main->b.info.rodata, main->bo->va->addr);
+   }
+
+   /* Point the shader at its constant data. Baked into the linked variant
+    * rather than pushed per draw: the address is fixed for the life of the
+    * shader, so there is nothing for the command buffer to do here.
+    */
+   if (main && main->data_addr) {
+      /* 4 halfs = the 64-bit pointer parked at the end of the data BO. */
+      agx_usc_uniform(&b, main->info.const_data_unif, 4, main->data_addr);
    }
 
    if (s->b.uses_txf)
