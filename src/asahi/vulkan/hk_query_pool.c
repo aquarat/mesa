@@ -72,6 +72,7 @@ hk_flush_if_timestamp(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool)
     */
    if (pool->vk.query_type == VK_QUERY_TYPE_TIMESTAMP) {
       perf_debug(cmd, "Flushing for timestamp copy");
+      hk_cmd_buffer_cross_dep(cmd);
       hk_cmd_buffer_end_graphics(cmd);
       hk_cmd_buffer_end_compute(cmd);
    }

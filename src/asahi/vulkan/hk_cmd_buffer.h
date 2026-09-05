@@ -399,6 +399,24 @@ struct hk_cs {
       uint32_t calls, cmds, flushes, merged;
    } stats;
 
+   /*
+    * Whether this command must also wait for prior work on the OTHER subqueue
+    * before it starts.
+    *
+    * AGX has two independent subqueues, VDM (render) and CDM (compute), and
+    * drm_asahi_cmd_header carries a separate barrier index for each.
+    * Honeykrisp used to make every command wait on all prior work on BOTH,
+    * which serialises the two engines completely: measured on Ghost of
+    * Tsushima, vertex 8.5 + fragment 5.1 + compute 19.1 ms per frame summed to
+    * the measured GPU-busy union of 32.6 ms, i.e. nothing ever overlapped.
+    *
+    * Vulkan only requires the cross-subqueue wait where a dependency was
+    * actually expressed, so this is set for the cases that have one and left
+    * clear otherwise, and hk_queue.c passes DRM_ASAHI_BARRIER_NONE for the
+    * other subqueue when it is clear.
+    */
+   bool cross_barrier;
+
    /* Timestamp writes. Currently just compute end / fragment end. We could
     * flesh this out later if we want finer info. (We will, but it's not
     * required for conformance.)
@@ -508,6 +526,15 @@ struct hk_cmd_buffer {
        */
       struct hk_cs *post_gfx;
    } current_cs;
+
+   /*
+    * Set when a cross-subqueue dependency has been expressed but the control
+    * stream that must honour it does not exist yet. Consumed by the next
+    * stream of the corresponding type, which then gets cross_barrier.
+    *
+    * [0] is HK_CS_CDM, [1] is HK_CS_VDM -- indexed by enum hk_cs_type.
+    */
+   bool cross_dep_pending[2];
 
    /* Are we currently inside a vk_meta operation? This alters sample location
     * behaviour.
@@ -628,6 +655,7 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
       list_inithead(&cs->node);
 
       bool before_gfx = (ptr == &cmd->current_cs.pre_gfx);
+      bool after_gfx = (ptr == &cmd->current_cs.post_gfx);
 
       /* Insert into the command buffer. We usually append to the end of the
        * command buffer, except for pre-graphics streams which go right before
@@ -641,6 +669,30 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
          list_addtail(&cs->node, &cmd->control_streams);
       }
 
+      /* Cross-subqueue dependencies the application never expressed, because
+       * they are ours: the driver runs compute for geometry and tessellation
+       * emulation, decompression and index robustness FOR a draw, and runs
+       * compute for queries AFTER one.
+       *
+       *   pre_gfx  compute feeds the render  -> the render waits on compute
+       *   post_gfx compute consumes the render -> the compute waits on render
+       *
+       * Anything else starts with no cross-subqueue wait and only gains one
+       * if a dependency is actually expressed.
+       */
+      cs->cross_barrier = cmd->cross_dep_pending[cs->type];
+      cmd->cross_dep_pending[cs->type] = false;
+
+      if (before_gfx) {
+         if (cmd->current_cs.gfx)
+            cmd->current_cs.gfx->cross_barrier = true;
+         else
+            cmd->cross_dep_pending[HK_CS_VDM] = true;
+      }
+
+      if (after_gfx)
+         cs->cross_barrier = true;
+
       *ptr = cs;
 
       if (!compute)
@@ -649,6 +701,18 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
 
    assert(*ptr != NULL);
    return *ptr;
+}
+
+/*
+ * Record that whatever runs next must wait for prior work on the OTHER
+ * subqueue, in both directions. Call this from anywhere that synchronises
+ * across the whole pipeline rather than within one engine.
+ */
+static inline void
+hk_cmd_buffer_cross_dep(struct hk_cmd_buffer *cmd)
+{
+   cmd->cross_dep_pending[HK_CS_CDM] = true;
+   cmd->cross_dep_pending[HK_CS_VDM] = true;
 }
 
 static inline struct hk_cs *

@@ -92,6 +92,7 @@ hk_CmdSetEvent2(VkCommandBuffer commandBuffer, VkEvent _event,
    VK_FROM_HANDLE(hk_event, event, _event);
 
    perf_debug(cmd, "Set event");
+   hk_cmd_buffer_cross_dep(cmd);
    hk_cmd_buffer_end_compute(cmd);
    hk_cmd_buffer_end_graphics(cmd);
    hk_queue_write(cmd, event->bo->va->addr, VK_EVENT_SET, false);
@@ -105,6 +106,7 @@ hk_CmdResetEvent2(VkCommandBuffer commandBuffer, VkEvent _event,
    VK_FROM_HANDLE(hk_event, event, _event);
 
    perf_debug(cmd, "Reset event");
+   hk_cmd_buffer_cross_dep(cmd);
    hk_cmd_buffer_end_compute(cmd);
    hk_cmd_buffer_end_graphics(cmd);
    hk_queue_write(cmd, event->bo->va->addr, VK_EVENT_RESET, false);
@@ -117,6 +119,7 @@ hk_CmdWaitEvents2(VkCommandBuffer commandBuffer, uint32_t eventCount,
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    perf_debug(cmd, "Wait events");
+   hk_cmd_buffer_cross_dep(cmd);
 
    /* The big hammer. Need to check if this is actually needed.
     *

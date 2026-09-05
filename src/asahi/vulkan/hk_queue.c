@@ -870,9 +870,42 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
          (struct hk_cmd_buffer *)submit->command_buffers[i];
 
       list_for_each_entry(struct hk_cs, cs, &cmdbuf->control_streams, node) {
-         /* Barrier on previous command */
-         struct drm_asahi_cmd_header header =
-            agx_cmd_header(cs->type == HK_CS_CDM, nr_vdm, nr_cdm);
+         /* Barrier on previous command.
+          *
+          * The two subqueues are independent, and drm_asahi_cmd_header takes a
+          * separate barrier index for each. Waiting on both from every command
+          * serialises the engines completely -- measured on Ghost of Tsushima,
+          * vertex + fragment + compute summed exactly to the GPU-busy union,
+          * so nothing ever overlapped.
+          *
+          * Wait on our OWN subqueue always: streams are split at points that
+          * usually imply a dependency, so that ordering is load-bearing. Wait
+          * on the OTHER one only where a dependency was actually expressed --
+          * an app barrier or event, or one of the driver's own pre-graphics /
+          * post-graphics compute streams. cs->cross_barrier records that.
+          *
+          * The first command of each type in a submit keeps the cross wait
+          * regardless: barriers are relative to the submit, so this is the
+          * only place that can express "wait for the other engine's work from
+          * previous ioctls", and per-command-buffer tracking cannot see it.
+          */
+         bool compute = cs->type == HK_CS_CDM;
+         bool first_of_type = compute ? (nr_cdm == 0) : (nr_vdm == 0);
+         bool cross = cs->cross_barrier || first_of_type ||
+                      !HK_PERF(dev, XOVERLAP);
+
+         uint16_t vdm_barrier = (compute && !cross) ? DRM_ASAHI_BARRIER_NONE
+                                                    : (uint16_t)nr_vdm;
+         uint16_t cdm_barrier = (!compute && !cross) ? DRM_ASAHI_BARRIER_NONE
+                                                     : (uint16_t)nr_cdm;
+
+         struct drm_asahi_cmd_header header = {
+            .cmd_type = compute ? DRM_ASAHI_CMD_COMPUTE : DRM_ASAHI_CMD_RENDER,
+            .size = compute ? sizeof(struct drm_asahi_cmd_compute)
+                            : sizeof(struct drm_asahi_cmd_render),
+            .vdm_barrier = vdm_barrier,
+            .cdm_barrier = cdm_barrier,
+         };
 
          util_dynarray_append(&payload, header);
 

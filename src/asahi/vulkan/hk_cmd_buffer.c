@@ -285,6 +285,12 @@ merge_control_streams(struct hk_cmd_buffer *cmd)
       if (cs->type == HK_CS_CDM && last && last->type == HK_CS_CDM &&
           !last->timestamp.end.handle) {
 
+         /* The merged stream starts where `last` starts, so if EITHER half
+          * needed to wait on the other subqueue, the survivor does. Dropping
+          * this would let work that was ordered after a render run before it.
+          */
+         last->cross_barrier |= cs->cross_barrier;
+
          hk_cs_merge_cdm(last, cs);
          list_del(&cs->node);
          hk_cs_destroy(cs);
@@ -428,6 +434,19 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
       }
       return;
    }
+
+   /* A barrier that names only compute stages on both sides cannot create a
+    * dependency between the two subqueues, so the streams that follow it may
+    * still overlap with the other engine. Anything else might, so make the
+    * next stream of each type wait across.
+    *
+    * Deliberately coarse: it does not try to work out which DIRECTION the
+    * dependency runs, because the cost of being wrong is a race that renders
+    * correctly most of the time, and the cost of being conservative is one
+    * cross-subqueue wait on a barrier that already ends both streams.
+    */
+   if (!compute_only)
+      hk_cmd_buffer_cross_dep(cmd);
 
    /* The big hammer. We end both compute and graphics batches. Ending compute
     * here is necessary to properly handle graphics->compute dependencies.
