@@ -210,6 +210,22 @@ hk_gputime_note_barrier(struct hk_device *dev, bool compute_only,
 }
 
 void
+hk_gputime_note_submit(struct hk_device *dev, bool compute, bool crossed)
+{
+   struct hk_gputime *gt = &dev->gputime;
+   if (!gt->enabled)
+      return;
+
+   unsigned q = compute ? 0 : 1;
+
+   simple_mtx_lock(&gt->lock);
+   gt->cmds_submitted[q]++;
+   if (crossed)
+      gt->cmds_crossed[q]++;
+   simple_mtx_unlock(&gt->lock);
+}
+
+void
 hk_gputime_note_precomp(struct hk_device *dev, unsigned prog, uint64_t threads,
                         bool indirect)
 {
@@ -701,6 +717,14 @@ hk_gputime_report(struct hk_device *dev, uint64_t now_ns)
               gt->dispatches ? (comp_ms * 1000.0) / gt->dispatches : 0.0,
               (unsigned long long)gt->draws);
       fprintf(stderr,
+              "[hk gputime]   subqueue waits: compute %llu/%llu crossed, "
+              "render %llu/%llu crossed  (uncrossed commands may overlap the "
+              "other engine)\n",
+              (unsigned long long)gt->cmds_crossed[0],
+              (unsigned long long)gt->cmds_submitted[0],
+              (unsigned long long)gt->cmds_crossed[1],
+              (unsigned long long)gt->cmds_submitted[1]);
+      fprintf(stderr,
               "[hk gputime]   pipeline barriers %llu (%.1f/frame): "
               "%llu compute-only (%.1f/frame ending real work), "
               "%llu compute-only but gfx open, "
@@ -757,6 +781,8 @@ hk_gputime_report(struct hk_device *dev, uint64_t now_ns)
    gt->barriers_compute = 0;
    gt->barriers_gfx_open = 0;
    gt->barriers_avoidable = 0;
+   gt->cmds_submitted[0] = gt->cmds_submitted[1] = 0;
+   gt->cmds_crossed[0] = gt->cmds_crossed[1] = 0;
    memset(gt->disp_kind, 0, sizeof(gt->disp_kind));
    gt->report_start_ns = now_ns;
 }

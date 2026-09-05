@@ -899,6 +899,8 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
          uint16_t cdm_barrier = (!compute && !cross) ? DRM_ASAHI_BARRIER_NONE
                                                      : (uint16_t)nr_cdm;
 
+         hk_gputime_note_submit(dev, compute, cross);
+
          struct drm_asahi_cmd_header header = {
             .cmd_type = compute ? DRM_ASAHI_CMD_COMPUTE : DRM_ASAHI_CMD_RENDER,
             .size = compute ? sizeof(struct drm_asahi_cmd_compute)

@@ -827,6 +827,21 @@ hk_cmd_buffer_end_graphics(struct hk_cmd_buffer *cmd)
 
    cmd->current_cs.gfx = NULL;
 
+   /* If compute ran to feed this render, make the NEXT graphics stream wait
+    * across too.
+    *
+    * A graphics stream is sometimes split mid-render-pass (depth bias, say),
+    * and the continuation still consumes what the pre-graphics compute
+    * produced. Usually that is safe by transitivity -- the continuation waits
+    * on the stream it split from, which waited on the compute -- but
+    * hk_optimize_empty_vdm() can drop the stream in the middle of that chain,
+    * and then there is nothing left holding the order. One extra
+    * cross-subqueue wait per render pass is a cheap price for not depending on
+    * which streams survive.
+    */
+   if (cmd->current_cs.pre_gfx)
+      cmd->cross_dep_pending[HK_CS_VDM] = true;
+
    hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.pre_gfx);
    hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.post_gfx);
 

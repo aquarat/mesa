@@ -210,6 +210,14 @@ struct hk_gputime {
     */
    uint64_t barriers_avoidable;
 
+   /* Commands submitted, and how many had to wait on the OTHER subqueue.
+    * Cross-subqueue overlap is only possible for the ones that did not, so
+    * this says directly how much of the workload the dependency tracking is
+    * actually freeing rather than leaving serialised.
+    */
+   uint64_t cmds_submitted[2];
+   uint64_t cmds_crossed[2];
+
    /* Set when HK_GPUTIME_ISOLATE=1: end the compute control stream after every
     * dispatch, so each one is timed individually. This perturbs -- it turns ~56
     * control streams per frame into ~1780 -- but a stream costs about 2 us to
@@ -272,6 +280,10 @@ void hk_gputime_note_precomp(struct hk_device *dev, unsigned prog,
  * graphics control stream was in progress, which alone forces the hammer. */
 void hk_gputime_note_barrier(struct hk_device *dev, bool compute_only,
                              bool gfx_open, bool ends_real_work);
+
+/* One submitted hardware command: `compute` selects the subqueue, `crossed`
+ * says whether it had to wait on the other one. */
+void hk_gputime_note_submit(struct hk_device *dev, bool compute, bool crossed);
 
 /* Record which shader owns the command that reserved this block. */
 void hk_gputime_set_block_owner(struct hk_device *dev, int blk,
