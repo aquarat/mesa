@@ -3681,6 +3681,26 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
       }
 
       cs->stats.cmds++;
+
+      /* Attribute the fragment phase to the shader that ran, the same way
+       * hk_cmd_dispatch.c attributes compute. A render command's firmware
+       * ts_frag pair covers every draw in the stream, so the interval is only
+       * chargeable when one fragment shader owned the whole stream -- exactly
+       * the condition HK_GPUTIME_MIXED records. Fragment was the last stage
+       * with no per-shader accounting at all.
+       */
+      if (unlikely(dev->gputime.enabled)) {
+         struct hk_api_shader *afs = cmd->state.gfx.shaders[MESA_SHADER_FRAGMENT];
+         const struct agx_shader_info *fsi =
+            afs ? &hk_only_variant(afs)->b.info : NULL;
+
+         if (cs->gputime_shader == NULL)
+            cs->gputime_shader = fsi;
+         else if (cs->gputime_shader != fsi)
+            cs->gputime_shader = HK_GPUTIME_MIXED;
+
+         hk_gputime_note_shader(dev, HK_DISP_FRAG, fsi, 0, false);
+      }
    }
 }
 
