@@ -875,6 +875,13 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
       struct hk_cmd_buffer *cmdbuf =
          (struct hk_cmd_buffer *)submit->command_buffers[i];
 
+      /* Dependencies are tracked per command buffer and never cross one, so
+       * a barrier recorded last in buffer A -- vkd3d-proton's usual
+       * end-of-list flush -- would set a flag nothing in buffer B consumes.
+       * Make the first stream of each type in EVERY buffer wait across.
+       * Conservative, cheap, and closes the gap. (Review finding.) */
+      bool seen_cdm = false, seen_vdm = false;
+
       list_for_each_entry(struct hk_cs, cs, &cmdbuf->control_streams, node) {
          /* Barrier on previous command.
           *
@@ -896,7 +903,11 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
           * previous ioctls", and per-command-buffer tracking cannot see it.
           */
          bool compute = cs->type == HK_CS_CDM;
-         bool first_of_type = compute ? (nr_cdm == 0) : (nr_vdm == 0);
+         bool first_of_type = compute ? !seen_cdm : !seen_vdm;
+         if (compute)
+            seen_cdm = true;
+         else
+            seen_vdm = true;
          bool cross = cs->cross_barrier || first_of_type ||
                       !HK_PERF(dev, XOVERLAP);
 

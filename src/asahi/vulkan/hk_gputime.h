@@ -56,6 +56,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <vulkan/vulkan_core.h>
+#include "util/mesa-blake3.h"
+#include "util/shader_stats.h"
 #include "util/simple_mtx.h"
 #include "util/u_dynarray.h"
 
@@ -116,9 +118,18 @@ enum hk_disp_kind {
 struct agx_shader_info;
 
 struct hk_gputime_shader {
-   const struct agx_shader_info *info; /* identity; NULL means a free slot */
+   /* IDENTITY ONLY. Never dereferenced after the slot is claimed: the
+    * pipeline that owns it can be destroyed before the next report, and was.
+    * Everything the report prints is copied below at claim time. (Review
+    * finding.) */
+   const struct agx_shader_info *info; /* NULL means a free slot */
    uint32_t id;                        /* small stable index, for reports */
    uint32_t kind;                      /* enum hk_disp_kind of first use */
+
+   struct agx2_stats stats;
+   uint8_t source_blake3[BLAKE3_KEY_LEN];
+   uint16_t workgroup;
+   uint8_t stage;
    uint64_t dispatches;
    uint64_t indirect;                  /* dispatches with an indirect grid */
    uint64_t threads;                   /* invocations launched (direct only) */

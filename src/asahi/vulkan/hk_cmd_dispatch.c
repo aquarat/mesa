@@ -62,7 +62,7 @@ hk_cmd_bind_compute_shader(struct hk_cmd_buffer *cmd,
  * for the measured per-bit cost and why the default is what it is.
  */
 static void
-hk_cdm_barrier_masked(struct hk_device *dev, struct hk_cs *cs, uint32_t mask)
+hk_cdm_barrier_masked(struct hk_cs *cs, uint32_t mask)
 {
    assert(cs->type == HK_CS_CDM);
    assert(cs->current + AGX_CDM_BARRIER_LENGTH < cs->end &&
@@ -193,9 +193,20 @@ hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
 
    if ((barrier & AGX_BARRIER_ALL) || HK_PERF(dev, FORCEBARRIER))
       hk_cdm_cache_flush(dev, cs);
-   else if (HK_PERF(dev, OVERLAP)) {
-      /* Still emit a barrier BLOCK, just a weak one: the stream seems to need
-       * the block for sequencing, and the cache bits are what serialise.
+   else if (!HK_PERF(dev, OVERLAP)) {
+      /* HK_PERFTEST=nooverlap promises a full barrier after EVERY dispatch.
+       * Honour that for AGX_BARRIER_NONE too: without this, a tessellate with
+       * no consumer emits no barrier block at all under nooverlap, which is
+       * exactly the state the overlap path goes out of its way to avoid.
+       * (Review finding.) */
+      hk_cdm_cache_flush(dev, cs);
+   } else {
+      /* Emit a barrier BLOCK, just a weak one. Whether the stream strictly
+       * needs a block at all is NOT established: the hang that suggested it
+       * came from an earlier implementation and was never isolated, and
+       * HK_PERFTEST=noflush (no block) measured no frame-rate change. What is
+       * established is that the cache bits are what serialise, and that this
+       * weak block is safe -- so it stays as the conservative choice.
        *
        * AGX_OVERLAP_MAX bounds how many dispatches may go by on a weak barrier
        * before a full one is forced. It exists to bisect a failure: if the game
@@ -203,7 +214,7 @@ hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
        * unflushed, not the idea of overlapping at all. 0 (the default) means
        * unbounded.
        */
-      hk_cdm_barrier_masked(dev, cs, hk_weak_barrier_mask(dev));
+      hk_cdm_barrier_masked(cs, hk_weak_barrier_mask(dev));
       cs->pending_flush = true;
       cs->weak_run++;
 

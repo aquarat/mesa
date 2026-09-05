@@ -119,8 +119,13 @@ shared_var_info(const struct glsl_type *type, unsigned *size, unsigned *align)
 uint64_t
 hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
 {
-   /* This could be optimized but it doesn't matter */
-   uint64_t flags = pdev->dev.debug;
+   /* Hash the inputs rather than shift-XOR them: shifted XOR lets one flag
+    * in ASAHI_MESA_DEBUG alias another in AGX_MESA_DEBUG, and the whole point
+    * of keying on these is that the cache must not lie. (Review finding.) */
+   uint64_t h = 0xcbf29ce484222325ull;
+#define MIX(v) do { uint64_t _v = (v); for (int _i = 0; _i < 8; ++_i) { \
+      h ^= (_v >> (8 * _i)) & 0xff; h *= 0x100000001b3ull; } } while (0)
+   MIX(pdev->dev.debug);
 
    /* AGX_MESA_DEBUG changes generated code -- nopreamble, noopt, nosched,
     * spill, nopromote and demand all do -- so it has to change the cache key.
@@ -134,7 +139,7 @@ hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
     * regression -- with the shader stats to match (one shader at 3964
     * instructions instead of 1974) -- until the cache was cleared.
     */
-   flags ^= agx_get_compiler_debug() << 16;
+   MIX(agx_get_compiler_debug());
 
    /* HK_PERFTEST likewise. norobust, noborder and noconstdata all change
     * generated code, and the flags are parsed per hk_device so they cannot be
@@ -150,13 +155,9 @@ hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
     */
    {
       const char *pt = getenv("HK_PERFTEST");
-      if (pt) {
-         uint64_t h = 0xcbf29ce484222325ull;
-         for (const char *c = pt; *c; ++c) {
-            h ^= (unsigned char)*c;
-            h *= 0x100000001b3ull;
-         }
-         flags ^= h;
+      for (const char *c = pt ? pt : ""; *c; ++c) {
+         h ^= (unsigned char)*c;
+         h *= 0x100000001b3ull;
       }
    }
 
@@ -164,9 +165,10 @@ hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
     * too. Without this, sweeping the knob silently reuses binaries compiled at
     * whatever setting happened to run first.
     */
-   flags ^= (uint64_t)agx_get_occupancy_target() << 32;
+   MIX(agx_get_occupancy_target());
+#undef MIX
 
-   return flags;
+   return h;
 }
 
 const nir_shader_compiler_options *
@@ -468,6 +470,13 @@ check_in_bounds(nir_builder *b, nir_intrinsic_instr *intr)
 
          uint64_t c = nir_scalar_as_uint(cst);
          if (c % load_size)
+            continue;
+
+         /* A negative 32-bit constant would read as ~2^32 here and make the
+          * limit saturate to 0, rejecting an access the byte path (which
+          * wraps) would accept. Probably unreachable, but the guard is free
+          * and keeps the two paths agreeing. (Review finding.) */
+         if (c >= 0x80000000u)
             continue;
 
          nir_scalar msrcs[] = {nir_scalar_chase_alu_src(mul, 0),
@@ -1087,7 +1096,7 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
             nir_opt_if_optimize_phi_true_false | nir_opt_if_avoid_64bit_phis);
 }
 
-static void
+static VkResult
 hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
 {
    /* Constant data section: read-only tables lifted out of per-invocation
@@ -1119,16 +1128,21 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
       shader->data_bo =
          agx_bo_create(&dev->dev, ptr_offs + sizeof(uint64_t), 0, 0,
                        "Shader constant data");
-      if (shader->data_bo) {
-         uint8_t *map = agx_bo_map(shader->data_bo);
-         uint64_t addr = shader->data_bo->va->addr;
+      /* If this fails, data_addr stays 0 and the shader would read its
+       * constant-data pointer from a uniform nothing ever wrote. Fail loudly
+       * instead of running a shader that dereferences garbage. (Review
+       * finding.) */
+      if (!shader->data_bo)
+         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
 
-         memcpy(map, shader->data_ptr, shader->data_size);
-         memcpy(map + ptr_offs, &addr, sizeof(addr));
+      uint8_t *map = agx_bo_map(shader->data_bo);
+      uint64_t addr = shader->data_bo->va->addr;
 
-         /* What the USC packet reads, not what the shader reads. */
-         shader->data_addr = addr + ptr_offs;
-      }
+      memcpy(map, shader->data_ptr, shader->data_size);
+      memcpy(map + ptr_offs, &addr, sizeof(addr));
+
+      /* What the USC packet reads, not what the shader reads. */
+      shader->data_addr = addr + ptr_offs;
    }
 
    if (shader->b.info.has_preamble || shader->b.info.rodata.size_16) {
@@ -1159,6 +1173,7 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
          shader->b.info.sampler_state_count, false);
       cfg.texture_state_register_count = shader->b.info.texture_state_count;
    }
+   return VK_SUCCESS;
 }
 
 DERIVE_HASH_TABLE(hk_fast_link_key_vs);
@@ -1484,7 +1499,10 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
    if (result != VK_SUCCESS)
       return vk_error(dev, result);
 
-   hk_upload_shader(dev, shader);
+   result = hk_upload_shader(dev, shader);
+   if (result != VK_SUCCESS)
+      return vk_error(dev, result);
+
    return VK_SUCCESS;
 }
 
@@ -1885,7 +1903,10 @@ hk_deserialize_shader(struct hk_device *dev, struct blob_reader *blob,
       return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
 
    shader->b.binary = (void *)shader->code_ptr;
-   hk_upload_shader(dev, shader);
+   result = hk_upload_shader(dev, shader);
+   if (result != VK_SUCCESS)
+      return vk_error(dev, result);
+
    return VK_SUCCESS;
 }
 
