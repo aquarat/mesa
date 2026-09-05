@@ -396,6 +396,74 @@ hk_barrier_servable_in_compute_stream(const VkDependencyInfo *info)
    return true;
 }
 
+/*
+ * Which subqueue does this stage mask name work on?
+ *
+ * Used to decide the DIRECTION of a cross-subqueue dependency. Getting this
+ * wrong in the unsafe direction gives races that mostly render correctly, so
+ * anything ambiguous counts as both:
+ *
+ *   - the ends of the pipe, ALL_COMMANDS and HOST say nothing about which
+ *     engine ran, so they are both;
+ *   - transfer, copy, blit, resolve and clear are compute kernels in hk for
+ *     buffers but can go through the graphics pipeline for images, so both;
+ *   - DRAW_INDIRECT covers indirect dispatch as well as indirect draw, so both.
+ *
+ * That leaves the genuinely graphics-only stages, which is the case worth
+ * catching: a colour-attachment-output -> fragment-shader barrier between two
+ * render passes is the commonest barrier this game issues, and it implies
+ * nothing whatsoever about compute.
+ */
+static void
+hk_stage_subqueues(VkPipelineStageFlags2 s, bool *gfx, bool *comp)
+{
+   const VkPipelineStageFlags2 gfx_only =
+      VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
+      VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT |
+      VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT |
+      VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+      VK_PIPELINE_STAGE_2_TESSELLATION_CONTROL_SHADER_BIT |
+      VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT |
+      VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT |
+      VK_PIPELINE_STAGE_2_PRE_RASTERIZATION_SHADERS_BIT |
+      VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+      VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+      VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT |
+      VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |
+      VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT;
+
+   const VkPipelineStageFlags2 comp_only =
+      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+
+   /* Everything not claimed by exactly one engine above. */
+   VkPipelineStageFlags2 ambiguous = s & ~(gfx_only | comp_only);
+
+   *gfx = (s & gfx_only) || ambiguous || s == 0;
+   *comp = (s & comp_only) || ambiguous || s == 0;
+}
+
+/*
+ * Record the cross-subqueue dependencies one barrier expresses, in the
+ * direction it expresses them: if the source ran on graphics and the
+ * destination runs on compute, the next compute must wait for graphics, and
+ * vice versa. A barrier purely within one engine needs neither.
+ */
+static void
+hk_note_barrier_direction(struct hk_cmd_buffer *cmd,
+                          VkPipelineStageFlags2 src,
+                          VkPipelineStageFlags2 dst)
+{
+   bool src_gfx, src_comp, dst_gfx, dst_comp;
+   hk_stage_subqueues(src, &src_gfx, &src_comp);
+   hk_stage_subqueues(dst, &dst_gfx, &dst_comp);
+
+   if (src_gfx && dst_comp)
+      cmd->cross_dep_pending[HK_CS_CDM] = true;
+
+   if (src_comp && dst_gfx)
+      cmd->cross_dep_pending[HK_CS_VDM] = true;
+}
+
 VKAPI_ATTR void VKAPI_CALL
 hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
                        const VkDependencyInfo *pDependencyInfo)
@@ -445,8 +513,39 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
     * correctly most of the time, and the cost of being conservative is one
     * cross-subqueue wait on a barrier that already ends both streams.
     */
-   if (!compute_only)
+   /* Take the cross-subqueue wait only in the direction each barrier actually
+    * expresses. The coarse version of this -- any barrier that is not
+    * compute-only waits both ways -- left almost nothing able to overlap,
+    * because 441 of the 471 barriers this game issues per frame name a
+    * graphics stage somewhere, and nearly all of those are graphics to
+    * graphics between render passes.
+    */
+   if (pDependencyInfo) {
+      const VkDependencyInfo *d = pDependencyInfo;
+
+      for (uint32_t i = 0; i < d->memoryBarrierCount; ++i)
+         hk_note_barrier_direction(cmd, d->pMemoryBarriers[i].srcStageMask,
+                                   d->pMemoryBarriers[i].dstStageMask);
+
+      for (uint32_t i = 0; i < d->bufferMemoryBarrierCount; ++i)
+         hk_note_barrier_direction(cmd,
+                                   d->pBufferMemoryBarriers[i].srcStageMask,
+                                   d->pBufferMemoryBarriers[i].dstStageMask);
+
+      for (uint32_t i = 0; i < d->imageMemoryBarrierCount; ++i)
+         hk_note_barrier_direction(cmd,
+                                   d->pImageMemoryBarriers[i].srcStageMask,
+                                   d->pImageMemoryBarriers[i].dstStageMask);
+
+      /* A barrier naming no dependency at all still ends both streams, so be
+       * conservative rather than clever about what it might have meant. */
+      if (d->memoryBarrierCount + d->bufferMemoryBarrierCount +
+             d->imageMemoryBarrierCount ==
+          0)
+         hk_cmd_buffer_cross_dep(cmd);
+   } else {
       hk_cmd_buffer_cross_dep(cmd);
+   }
 
    /* The big hammer. We end both compute and graphics batches. Ending compute
     * here is necessary to properly handle graphics->compute dependencies.
