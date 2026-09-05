@@ -103,6 +103,20 @@ hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
    /* This could be optimized but it doesn't matter */
    uint64_t flags = pdev->dev.debug;
 
+   /* AGX_MESA_DEBUG changes generated code -- nopreamble, noopt, nosched,
+    * spill, nopromote and demand all do -- so it has to change the cache key.
+    *
+    * pdev->dev.debug above is ASAHI_MESA_DEBUG, a different variable, so
+    * without this the compiler debug flags are invisible to the cache. That is
+    * not theoretical: a single run with AGX_MESA_DEBUG=nopreamble wrote
+    * preamble-less binaries into the cache under the ordinary key, and every
+    * later run picked them up. The game stayed at 26 ms of compute per frame
+    * against 18 ms before, and looked for all the world like a driver
+    * regression -- with the shader stats to match (one shader at 3964
+    * instructions instead of 1974) -- until the cache was cleared.
+    */
+   flags ^= agx_get_compiler_debug() << 16;
+
    /* AGX_OCCUPANCY changes generated code, so it has to change the cache key
     * too. Without this, sweeping the knob silently reuses binaries compiled at
     * whatever setting happened to run first.
