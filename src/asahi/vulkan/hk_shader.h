@@ -109,6 +109,14 @@ struct hk_shader_info {
    uint8_t cull_distance_array_size;
    uint8_t set_count;
 
+   /* Uniform half-slot holding the 64-bit address of this shader's constant
+    * data section, or 0 if it has none. Assigned at compile time (it sits just
+    * past the root descriptor and the descriptor sets) and bound when the
+    * shader is fast-linked, so it costs nothing per draw.
+    */
+   uint16_t const_data_unif;
+   uint8_t _pad_const[2];
+
    /* XXX: is there a less goofy way to do this? I really don't want dynamic
     * allocation here.
     */
@@ -163,7 +171,12 @@ struct hk_shader {
     */
    uint64_t preamble_addr;
 
-   /* Address of the start of the shader data section */
+   /* Constant data section: the shader's read-only tables, moved out of
+    * per-invocation scratch by nir_opt_large_constants. `data_ptr` is the CPU
+    * copy (it is what gets serialised into the pipeline cache); `data_bo` and
+    * `data_addr` are the GPU copy the shader actually reads.
+    */
+   struct agx_bo *data_bo;
    uint64_t data_addr;
 };
 
