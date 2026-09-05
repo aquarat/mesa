@@ -1,5 +1,5 @@
 /*
- * Copyright 2026 Claude / got-bringup
+ * Copyright 2026 aquarat
  * SPDX-License-Identifier: MIT
  */
 
