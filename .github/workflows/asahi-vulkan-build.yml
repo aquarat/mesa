@@ -59,7 +59,7 @@ jobs:
             'pkgconfig(wayland-protocols)' \
             llvm-devel clang-devel spirv-tools-devel spirv-llvm-translator-devel
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Configure
         run: |
@@ -94,7 +94,7 @@ jobs:
           readelf -d "$so" | grep NEEDED
           echo "so=$so" >> "$GITHUB_ENV"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: libvulkan_asahi
           path: ${{ env.so }}
