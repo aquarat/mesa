@@ -86,6 +86,25 @@ union hk_key {
    struct hk_fs_key fs;
 };
 
+/*
+ * HK_PERFTEST=noconstdata, read from the environment rather than through
+ * HK_PERF(): the flags are parsed per hk_device and shader preprocessing has
+ * only a physical device. It is a one-off ablation switch, so a static is
+ * enough.
+ */
+static bool
+hk_no_const_data(void)
+{
+   static int cached = -1;
+
+   if (unlikely(cached < 0)) {
+      const char *e = getenv("HK_PERFTEST");
+      cached = (e && strstr(e, "noconstdata")) ? 1 : 0;
+   }
+
+   return cached == 1;
+}
+
 static void
 shared_var_info(const struct glsl_type *type, unsigned *size, unsigned *align)
 {
@@ -116,6 +135,30 @@ hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
     * instructions instead of 1974) -- until the cache was cleared.
     */
    flags ^= agx_get_compiler_debug() << 16;
+
+   /* HK_PERFTEST likewise. norobust, noborder and noconstdata all change
+    * generated code, and the flags are parsed per hk_device so they cannot be
+    * read through HK_PERF() from here -- hash the raw string instead, which is
+    * conservative (nooverlap changes no code and still changes the key) and
+    * cannot miss a flag added later.
+    *
+    * Found by an ablation that produced identical shader statistics with and
+    * without HK_PERFTEST=noconstdata: the run had loaded binaries compiled
+    * with the pass enabled, and the measurement said the pass was worth 1.5%
+    * when it had not been disabled at all. Exactly the AGX_MESA_DEBUG bug
+    * above, one variable over.
+    */
+   {
+      const char *pt = getenv("HK_PERFTEST");
+      if (pt) {
+         uint64_t h = 0xcbf29ce484222325ull;
+         for (const char *c = pt; *c; ++c) {
+            h ^= (unsigned char)*c;
+            h *= 0x100000001b3ull;
+         }
+         flags ^= h;
+      }
+   }
 
    /* AGX_OCCUPANCY changes generated code, so it has to change the cache key
     * too. Without this, sweeping the knob silently reuses binaries compiled at
@@ -218,8 +261,13 @@ hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev, nir_shader *nir)
     */
    NIR_PASS(_, nir, nir_lower_var_copies);
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
-   NIR_PASS(_, nir, nir_opt_large_constants, glsl_get_natural_size_align_bytes,
-            16);
+
+   /* HK_PERFTEST=noconstdata restores the old behaviour, so the value of this
+    * pass can be measured against the driver that ships it. */
+   if (likely(!hk_no_const_data())) {
+      NIR_PASS(_, nir, nir_opt_large_constants,
+               glsl_get_natural_size_align_bytes, 16);
+   }
 
    /* Optimize but allow copies because we haven't lowered them yet */
    agx_preprocess_nir(nir);

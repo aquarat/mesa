@@ -51,6 +51,7 @@ static const struct debug_named_value hk_perf_options[] = {
    {"csbarrier",    HK_PERF_CSBARRIER,    "Serve compute-only pipeline barriers with an in-stream CDM barrier instead of ending the control stream"},
    {"xoverlap",     HK_PERF_XOVERLAP,     "Let the render and compute subqueues overlap (default off: correct, but worth no frame rate here)"},
    {"noxoverlap",   HK_PERF_NOXOVERLAP,   "Explicitly disable subqueue overlap (already the default)"},
+   {"noconstdata",  HK_PERF_NOCONSTDATA,  "Do not move constant tables out of per-invocation scratch (for ablation)"},
    DEBUG_NAMED_VALUE_END
 };
 /* clang-format on */
