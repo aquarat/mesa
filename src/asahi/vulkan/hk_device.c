@@ -49,8 +49,8 @@ static const struct debug_named_value hk_perf_options[] = {
    {"overlap",      HK_PERF_OVERLAP,      "Let independent vkCmdDispatch calls overlap (default ON)"},
    {"nooverlap",    HK_PERF_NOOVERLAP,    "Disable dispatch overlap, restoring a full barrier after every dispatch"},
    {"csbarrier",    HK_PERF_CSBARRIER,    "Serve compute-only pipeline barriers with an in-stream CDM barrier instead of ending the control stream"},
-   {"xoverlap",     HK_PERF_XOVERLAP,     "Let the render and compute subqueues overlap (default ON)"},
-   {"noxoverlap",   HK_PERF_NOXOVERLAP,   "Make every command wait on both subqueues, as before"},
+   {"xoverlap",     HK_PERF_XOVERLAP,     "Let the render and compute subqueues overlap (default off: correct, but worth no frame rate here)"},
+   {"noxoverlap",   HK_PERF_NOXOVERLAP,   "Explicitly disable subqueue overlap (already the default)"},
    DEBUG_NAMED_VALUE_END
 };
 /* clang-format on */
@@ -355,15 +355,28 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    if (!(dev->perftest & HK_PERF_NOOVERLAP))
       dev->perftest |= HK_PERF_OVERLAP;
 
-   /* Let the render and compute subqueues overlap. Every command used to wait
-    * on all prior work on BOTH, which serialised the two engines outright:
-    * vertex 8.5 + fragment 5.1 + compute 19.1 ms per frame summed to the
-    * measured GPU-busy union of 32.6 ms, so nothing ever overlapped.
+   /* HK_PERF_XOVERLAP lets the render and compute subqueues overlap. It is
+    * OFF by default, which deserves an explanation since it works.
     *
-    * HK_PERFTEST=noxoverlap restores the old behaviour.
+    * Every command used to wait on all prior work on BOTH subqueues, which
+    * serialised the engines outright -- vertex 8.5 + fragment 5.1 + compute
+    * 19.1 ms per frame summed to the measured GPU-busy union of 32.6 ms, so
+    * nothing ever overlapped. With dependency tracking the overlap becomes
+    * real and measurable, but small: 1.76 of 32.9 ms, and the frame rate does
+    * not move (22.21 with it against 22.40 without, in the same session).
+    *
+    * The reason is that most of those waits are genuine. The driver runs
+    * compute FOR nearly every render pass -- 143 draw_robust_index dispatches
+    * and ~34 tessellation dispatches per frame in Ghost of Tsushima -- and
+    * the draw consumes what they produce. Only 13% of compute and 26% of
+    * render commands are free to overlap at all.
+    *
+    * So this is a synchronisation change whose failure mode is a race that
+    * renders correctly most of the time, in exchange for no measured gain on
+    * the workload it was written for. Off unless asked for. Enable with
+    * HK_PERFTEST=xoverlap; a workload with less driver-generated pre-draw
+    * compute would get more from it. See got-bringup/data/subqueue-overlap.md.
     */
-   if (!(dev->perftest & HK_PERF_NOXOVERLAP))
-      dev->perftest |= HK_PERF_XOVERLAP;
 
    if (dev->perftest) {
       fprintf(stderr, "[hk] HK_PERFTEST active: 0x%x (%s)\n", dev->perftest,
