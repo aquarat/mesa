@@ -152,6 +152,7 @@ enum hk_perftest {
    HK_PERF_CSBARRIER = BITFIELD_BIT(9),
    HK_PERF_XOVERLAP = BITFIELD_BIT(10),
    HK_PERF_NOXOVERLAP = BITFIELD_BIT(11),
+   HK_PERF_NOCONSTDATA = BITFIELD_BIT(12),
 };
 
 #define HK_PERF(dev, flag) unlikely((dev)->perftest &HK_PERF_##flag)
