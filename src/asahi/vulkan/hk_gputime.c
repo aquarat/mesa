@@ -269,6 +269,11 @@ hk_gputime_shader_entry(struct hk_gputime *gt, const struct agx_shader_info *inf
          e->info = info;
          e->id = gt->nr_shaders++;
          e->kind = kind;
+         e->stats = info->stats;
+         memcpy(e->source_blake3, info->source_blake3, sizeof(e->source_blake3));
+         e->workgroup = info->workgroup_size[0] * info->workgroup_size[1] *
+                        info->workgroup_size[2];
+         e->stage = info->stage;
          return e;
       }
    }
@@ -406,10 +411,10 @@ hk_disp_kind_name(uint32_t kind)
  * occupancy is a memory-bound shader the model will under-rank.
  */
 static uint64_t
-hk_shader_cycles_per_invocation(const struct agx_shader_info *info)
+hk_shader_cycles_per_invocation(const struct agx2_stats *st)
 {
-   uint32_t c = MAX2(info->stats.alu, info->stats.fscib);
-   return MAX2(c, info->stats.ic);
+   uint32_t c = MAX2(st->alu, st->fscib);
+   return MAX2(c, st->ic);
 }
 
 static int
@@ -425,8 +430,8 @@ cmp_shader_cost(const void *a, const void *b)
          return x->measured_ticks > y->measured_ticks ? -1 : 1;
    }
 
-   uint64_t cx = x->threads * hk_shader_cycles_per_invocation(x->info);
-   uint64_t cy = y->threads * hk_shader_cycles_per_invocation(y->info);
+   uint64_t cx = x->threads * hk_shader_cycles_per_invocation(&x->stats);
+   uint64_t cy = y->threads * hk_shader_cycles_per_invocation(&y->stats);
 
    if (cx != cy)
       return cx > cy ? -1 : 1;
@@ -456,7 +461,7 @@ hk_gputime_report_shaders(struct hk_gputime *gt, uint64_t frames, double hz)
          continue;
 
       live[n++] = *e;
-      total_cycles += e->threads * hk_shader_cycles_per_invocation(e->info);
+      total_cycles += e->threads * hk_shader_cycles_per_invocation(&e->stats);
       total_measured += e->measured_ticks;
 
       /* Keep the identity and the id, drop the counts: the report is per
@@ -487,8 +492,7 @@ hk_gputime_report_shaders(struct hk_gputime *gt, uint64_t frames, double hz)
 
       for (unsigned i = 0; i < MIN2(n, 20); ++i) {
          struct hk_gputime_shader *e = &live[i];
-         const struct agx_shader_info *in = e->info;
-         uint64_t cyc = hk_shader_cycles_per_invocation(in);
+         uint64_t cyc = hk_shader_cycles_per_invocation(&e->stats);
          uint64_t cost = e->threads * cyc;
 
          /* The SPIR-V hash is the join key to the disassembly: run the game
@@ -497,7 +501,7 @@ hk_gputime_report_shaders(struct hk_gputime *gt, uint64_t frames, double hz)
           * each dump carries the same source_blake3.
           */
          char blake[BLAKE3_HEX_LEN];
-         _mesa_blake3_format(blake, in->source_blake3);
+         _mesa_blake3_format(blake, e->source_blake3);
          blake[12] = '\0';
 
          double meas_ms = (e->measured_ticks / hz) * 1000.0;
@@ -511,25 +515,23 @@ hk_gputime_report_shaders(struct hk_gputime *gt, uint64_t frames, double hz)
                  meas_ms * per_frame,
                  total_measured ? 100.0 * e->measured_ticks / total_measured
                                 : 0.0,
-                 (unsigned long long)cyc, in->stats.instrs, in->stats.gprs,
-                 in->stats.threads,
+                 (unsigned long long)cyc, e->stats.instrs, e->stats.gprs,
+                 e->stats.threads,
                  /* Hardware loop count. A shader with loops can execute
                   * unboundedly more instructions than `inst` suggests, which is
                   * exactly where the static cycle estimate stops meaning
                   * anything -- measured locally at 2894 us for a single
                   * 32-invocation dispatch with a data-dependent loop
                   * (tests/cstest.c). */
-                 in->stats.loops, in->stats.spills, in->stats.fills,
+                 e->stats.loops, e->stats.spills, e->stats.fills,
                  /* Scratch is private memory the shader addresses indirectly.
                   * It is reported separately from spill/fill because the two
                   * have the same symptom -- memory traffic per invocation the
                   * static cycle estimate is blind to -- but completely
                   * different cures: spills want less register pressure,
                   * scratch wants the indirectly-indexed array gone. */
-                 in->stats.scratch,
-                 in->workgroup_size[0] * in->workgroup_size[1] *
-                    in->workgroup_size[2],
-                 _mesa_shader_stage_to_abbrev(in->stage), blake,
+                 e->stats.scratch, e->workgroup,
+                 _mesa_shader_stage_to_abbrev(e->stage), blake,
                  e->indirect ? " (indirect)" : "");
       }
    }
@@ -744,7 +746,7 @@ hk_gputime_report(struct hk_device *dev, uint64_t now_ns)
    fprintf(stderr,
            "[hk gputime]   GPU busy (union) %.1f ms = %.1f%% of wall%s\n",
            busy_ms, wall_ms > 0 ? 100.0 * busy_ms / wall_ms : 0.0,
-           gt->skipped ? "" : "");
+           "");
    if (gaps) {
       static const char *gap_names[4] = {"<10us", "<100us", "<1ms", ">=1ms"};
       fprintf(stderr,

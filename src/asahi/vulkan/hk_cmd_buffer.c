@@ -505,13 +505,7 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
 
    /* A barrier that names only compute stages on both sides cannot create a
     * dependency between the two subqueues, so the streams that follow it may
-    * still overlap with the other engine. Anything else might, so make the
-    * next stream of each type wait across.
-    *
-    * Deliberately coarse: it does not try to work out which DIRECTION the
-    * dependency runs, because the cost of being wrong is a race that renders
-    * correctly most of the time, and the cost of being conservative is one
-    * cross-subqueue wait on a barrier that already ends both streams.
+    * still overlap with the other engine.
     */
    /* Take the cross-subqueue wait only in the direction each barrier actually
     * expresses. The coarse version of this -- any barrier that is not
@@ -1151,6 +1145,15 @@ hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd)
 
    clear_attachment_as_image(cmd, render, &render->stencil_att,
                              VK_IMAGE_ASPECT_STENCIL_BIT);
+
+   /* Those clears just ran on the COMPUTE subqueue, but the application
+    * described this render pass with graphics stages, so the subqueue
+    * dependency tracking cannot see it: the clear would neither wait on the
+    * previous render nor be waited on by the next. Order it against the
+    * other engine in both directions. (Review finding.) */
+   hk_cmd_buffer_cross_dep(cmd);
+   if (cmd->current_cs.cs)
+      cmd->current_cs.cs->cross_barrier = true;
 
    /* Remove the VDM control stream from the command buffer, now that it is
     * replaced by equivalent other operations.

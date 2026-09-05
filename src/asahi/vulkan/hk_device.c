@@ -379,7 +379,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
     * compute would get more from it. See got-bringup/data/subqueue-overlap.md.
     */
 
-   if (dev->perftest) {
+   if (getenv("HK_PERFTEST")) {
       fprintf(stderr, "[hk] HK_PERFTEST active: 0x%x (%s)\n", dev->perftest,
               getenv("HK_PERFTEST") ?: "");
    }
