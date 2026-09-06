@@ -155,6 +155,7 @@ agx_write_registers(const agx_instr *I, unsigned d)
    switch (I->op) {
    case AGX_OPCODE_MOV:
    case AGX_OPCODE_PHI:
+   case AGX_OPCODE_SIMD_MATRIX_FMADD:
       /* Tautological */
       return agx_index_size_16(I->dest[d]);
 
@@ -246,6 +247,10 @@ agx_read_registers(const agx_instr *I, unsigned s)
    case AGX_OPCODE_EXPORT:
       /* Tautological */
       return agx_index_size_16(I->src[0]);
+
+   case AGX_OPCODE_SIMD_MATRIX_FMADD:
+      /* Register pairs (two matrix elements per lane) */
+      return agx_index_size_16(I->src[s]);
 
    case AGX_OPCODE_PHI:
       if (I->src[s].type == AGX_INDEX_IMMEDIATE)

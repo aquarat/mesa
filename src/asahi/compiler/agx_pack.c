@@ -418,6 +418,16 @@ agx_pack_alu(struct util_dynarray *emission, agx_instr *I)
    uint64_t raw = encoding.exact;
    uint16_t extend = 0;
 
+   /* simd_matrix_fmadd16 vs fmadd32: bit 26 selects the 32-bit variant. The
+    * operands are register pairs; the generic ALU operand encoding of the
+    * first register with a 16/32-bit size flag is exactly the "paired" form.
+    */
+   if (I->op == AGX_OPCODE_SIMD_MATRIX_FMADD) {
+      pack_assert(I, I->dest[0].size == I->src[2].size);
+      if (I->dest[0].size == AGX_SIZE_32)
+         raw |= (1ull << 26);
+   }
+
    // TODO: assert saturable
    if (I->saturate)
       raw |= (1 << 6);

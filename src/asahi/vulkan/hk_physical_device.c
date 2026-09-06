@@ -55,6 +55,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .KHR_bind_memory2 = true,
       .KHR_buffer_device_address = true,
       .KHR_calibrated_timestamps = true,
+      .KHR_cooperative_matrix = true,
       .KHR_copy_commands2 = true,
       .KHR_create_renderpass2 = true,
       .KHR_dedicated_allocation = true,
@@ -378,6 +379,10 @@ hk_get_device_features(
       .shaderZeroInitializeWorkgroupMemory = true,
       .dynamicRendering = true,
       .shaderIntegerDotProduct = true,
+
+      /* VK_KHR_cooperative_matrix */
+      .cooperativeMatrix = true,
+      .cooperativeMatrixRobustBufferAccess = false,
       .maintenance4 = true,
 
       /* Vulkan 1.4 */
@@ -919,6 +924,9 @@ hk_get_device_properties(const struct agx_device *dev,
       .minSubgroupSize = 32,
       .maxSubgroupSize = 32,
       .maxComputeWorkgroupSubgroups = 1024 / 32,
+
+      /* VK_KHR_cooperative_matrix */
+      .cooperativeMatrixSupportedStages = VK_SHADER_STAGE_COMPUTE_BIT,
       .requiredSubgroupSizeStages = 0,
       .maxInlineUniformBlockSize = HK_MAX_INLINE_UNIFORM_BLOCK_SIZE,
       .maxPerStageDescriptorInlineUniformBlocks = 32,
@@ -1535,4 +1543,52 @@ hk_GetPhysicalDeviceMultisamplePropertiesEXT(
    } else {
       pMultisampleProperties->maxSampleLocationGridSize = (VkExtent2D){0, 0};
    }
+}
+
+/* VK_KHR_cooperative_matrix.
+ *
+ * The hardware instruction is an 8x8x8 SIMD-group multiply-accumulate in f16
+ * or f32 (simd_matrix_fmadd16/32); the lowering tiles larger shapes into 8x8
+ * pieces, so 16x16x16 is offered too (it is what most applications probe
+ * for). A mixed f16 x f16 + f32 product is done in f32 after an exact
+ * elementwise widening of A and B, so it costs the same as the f32 shape.
+ */
+VKAPI_ATTR VkResult VKAPI_CALL
+hk_GetPhysicalDeviceCooperativeMatrixPropertiesKHR(
+   VkPhysicalDevice physicalDevice, uint32_t *pPropertyCount,
+   VkCooperativeMatrixPropertiesKHR *pProperties)
+{
+   VK_OUTARRAY_MAKE_TYPED(VkCooperativeMatrixPropertiesKHR, out, pProperties,
+                          pPropertyCount);
+
+   static const struct {
+      uint32_t m, n, k;
+      VkComponentTypeKHR ab, c;
+   } shapes[] = {
+      {16, 16, 16, VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR},
+      {16, 16, 16, VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT16_KHR},
+      {16, 16, 16, VK_COMPONENT_TYPE_FLOAT32_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR},
+      {8, 8, 8, VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR},
+      {8, 8, 8, VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT16_KHR},
+      {8, 8, 8, VK_COMPONENT_TYPE_FLOAT32_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR},
+   };
+
+   for (unsigned i = 0; i < ARRAY_SIZE(shapes); ++i) {
+      vk_outarray_append_typed(VkCooperativeMatrixPropertiesKHR, &out, p) {
+         *p = (VkCooperativeMatrixPropertiesKHR){
+            .sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR,
+            .MSize = shapes[i].m,
+            .NSize = shapes[i].n,
+            .KSize = shapes[i].k,
+            .AType = shapes[i].ab,
+            .BType = shapes[i].ab,
+            .CType = shapes[i].c,
+            .ResultType = shapes[i].c,
+            .saturatingAccumulation = false,
+            .scope = VK_SCOPE_SUBGROUP_KHR,
+         };
+      }
+   }
+
+   return vk_outarray_status(&out);
 }

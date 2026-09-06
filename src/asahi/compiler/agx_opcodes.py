@@ -253,6 +253,13 @@ for window, w_bit in [('quad_', 0), ('', 1)]:
            encoding = (0b0100010 | (T_bit << 4) | (w_bit << 48), 8, _),
            srcs = 2, imms = [cond, INVERT_COND])
 
+# 8x8x8 SIMD-group matrix multiply-accumulate: D = A * B + C, where each
+# operand is a register pair per lane (two matrix elements). Bit 26 selects
+# the 32-bit variant and is set at pack time from the operand size. Not
+# is_float: the src0 modifier slot (bits 26-27) is repurposed by this encoding.
+op("simd_matrix_fmadd", encoding = (0b01101111 | (1 << 27) | (1 << 63), 8, _),
+   srcs = 3)
+
 # Pseudo-instructions for compares returning 1/0
 op("icmp", _, srcs = 2, imms = [ICOND, INVERT_COND])
 op("fcmp", _, srcs = 2, imms = [FCOND, INVERT_COND])

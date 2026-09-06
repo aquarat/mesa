@@ -2469,6 +2469,13 @@ intrinsic("load_active_subgroup_count_agx", dest_comp=1, flags=[CAN_ELIMINATE])
 # Like ballot() but only within a quad.
 intrinsic("quad_ballot_agx", src_comp=[1], dest_comp=1, flags=[CAN_ELIMINATE])
 
+# AGX 8x8x8 SIMD-group matrix multiply-accumulate (simd_matrix_fmadd16/32).
+# Every 8x8 tile is spread over the 32 lanes with two elements per lane, so
+# each operand is a 2-vector per lane: src[] = { a, b, c }, result = a * b + c.
+# The result/accumulator bit size is that of c; a and b are f16 or f32.
+intrinsic("cmat_muladd_agx", src_comp=[2, 2, 2], dest_comp=2, bit_sizes=src2,
+          flags=SUBGROUP_FLAGS)
+
 # With [0, 1] clipping, no transform is needed on the output z' = z. But with [-1,
 # 1] clipping, we need to transform z' = (z + w) / 2. We express both cases as a
 # lerp between z and w, where this is the lerp coefficient: 0 for [0, 1] and 0.5

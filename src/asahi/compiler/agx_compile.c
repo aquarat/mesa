@@ -1737,6 +1737,14 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
       return agx_ballot_to(b, dst, agx_src_index(&instr->src[0]));
    }
 
+   case nir_intrinsic_cmat_muladd_agx: {
+      agx_simd_matrix_fmadd_to(b, dst, agx_src_index(&instr->src[0]),
+                               agx_src_index(&instr->src[1]),
+                               agx_src_index(&instr->src[2]));
+      agx_emit_cached_split(b, dst, 2);
+      return NULL;
+   }
+
    case nir_intrinsic_quad_ballot_agx: {
       return agx_quad_ballot_to(b, dst, agx_src_index(&instr->src[0]));
    }

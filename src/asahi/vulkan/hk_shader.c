@@ -196,6 +196,13 @@ hk_get_spirv_options(struct vk_physical_device *vk_pdev,
 void
 hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev, nir_shader *nir)
 {
+   /* VK_KHR_cooperative_matrix: lower cmat types/intrinsics to per-lane
+    * 2-vectors and simd_matrix_fmadd while the memory accesses are still
+    * derefs (explicit IO is lowered later in hk_lower_nir) and before
+    * nir_lower_vars_to_ssa meets the cmat-typed variables.
+    */
+   NIR_PASS(_, nir, hk_nir_lower_cooperative_matrix);
+
    /* Must lower before io to temps */
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       NIR_PASS(_, nir, nir_lower_terminate_to_demote);
