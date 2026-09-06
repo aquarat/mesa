@@ -109,6 +109,30 @@ lane_origin(nir_builder *b, nir_def *lane, nir_def **row, nir_def **col)
                    nir_imul_imm(b, nir_iand_imm(b, lane, 1), 2));
 }
 
+/*
+ * HK_CMAT_VECLOAD selects how a lane moves its two elements of a tile when
+ * they are contiguous:
+ *
+ *   0 (default) two scalar accesses, one per element
+ *   1           one two-component access of the element type
+ *   2           one 32-bit access, for a 4-byte-aligned 16-bit pair
+ *
+ * 1 and 2 are one instruction instead of two and measure smaller (fewer
+ * instructions, fewer registers, same occupancy), but on G13G they are also
+ * measurably *slower* in ggml's mul_mm once its inner loop stops re-issuing
+ * the same tile load (-10 % on llama-bench pp512, -8 % on a ViT-H graph), so
+ * the scalar form is what ships. See PHASE5 for the numbers.
+ */
+static unsigned
+hk_cmat_vecload(void)
+{
+   static int mode = -1;
+   if (mode < 0)
+      mode = debug_get_num_option("HK_CMAT_VECLOAD", 0);
+
+   return mode;
+}
+
 static bool
 lower_cmat_load_store(nir_builder *b, nir_intrinsic_instr *intr,
                       const struct lower_cmat_ctx *ctx)
@@ -138,9 +162,65 @@ lower_cmat_load_store(nir_builder *b, nir_intrinsic_instr *intr,
    nir_def *row, *col0;
    lane_origin(b, lane, &row, &col0);
 
+   nir_def *src = is_load ? NULL : load_cmat_src(b, intr->src[!is_load]);
+
+   /* A lane owns two *horizontally* adjacent elements (col, col+1) of the
+    * tile, so in the row-major orientation its whole share of the tile is one
+    * contiguous vector in memory and can be moved with a single access. In
+    * the column-major orientation the same two elements are a row stride
+    * apart, so that case keeps the scalar path.
+    *
+    * The address is still computed in scalar elements (the row stride is
+    * arbitrary), so the vector access is only naturally aligned when the
+    * pointee is itself a vector: col is always even, hence so is
+    * ptr_vec * stride * row + col when ptr_vec is. Claim no more than that -
+    * agx lowers an under-aligned vec2 to a two-component 16-bit access, which
+    * is still one instruction, rather than to two accesses.
+    */
+   if (row_major && length > 1 && hk_cmat_vecload()) {
+      nir_def *idx =
+         nir_iadd(b, nir_imul(b, nir_u2uN(b, row, idx_bits), stride),
+                  nir_u2uN(b, col0, idx_bits));
+
+      nir_deref_instr *e = nir_build_deref_ptr_as_array(b, deref, idx);
+      const unsigned align = (ptr_vec % 2) ? elem_size_B : 2 * elem_size_B;
+
+      /* Mode 2: when the pair is 4-byte aligned and 32 bits wide, move it as
+       * one 32-bit scalar instead of a two-component 16-bit access. Both are
+       * a single instruction; neither was faster here.
+       */
+      if (length * elem_size_B == 4 && align >= 4 && hk_cmat_vecload() == 2) {
+         e = nir_build_deref_cast_with_alignment(b, &e->def, deref->modes,
+                                                 glsl_uint_type(), 4, 4, 0);
+
+         if (is_load) {
+            nir_def *v = nir_load_deref(b, e);
+            store_cmat_src(b, intr->src[0],
+                           nir_unpack_32_2x16(b, v));
+         } else {
+            nir_store_deref(b, e, nir_pack_32_2x16(b, src), ~0);
+         }
+
+         nir_instr_remove(&intr->instr);
+         return true;
+      }
+
+      e = nir_build_deref_cast_with_alignment(
+         b, &e->def, deref->modes,
+         glsl_vector_type(desc.element_type, length), length * elem_size_B,
+         align, 0);
+
+      if (is_load)
+         store_cmat_src(b, intr->src[0], nir_load_deref(b, e));
+      else
+         nir_store_deref(b, e, src, ~0);
+
+      nir_instr_remove(&intr->instr);
+      return true;
+   }
+
    nir_def *elems[NIR_MAX_VEC_COMPONENTS];
    if (!is_load) {
-      nir_def *src = load_cmat_src(b, intr->src[!is_load]);
       for (unsigned p = 0; p < length; p++)
          elems[p] = nir_channel(b, src, p);
    }
