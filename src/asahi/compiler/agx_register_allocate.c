@@ -1001,6 +1001,22 @@ pick_regs(struct ra_ctx *rctx, agx_instr *I, unsigned d)
    return find_regs(rctx, I, d, count, align);
 }
 
+/*
+ * Whether source s may be killed early, i.e. its registers reused for the
+ * destination of the same instruction. simd_matrix_fmadd is a multi-cycle
+ * SIMD-group operation that reads its A and B register pairs while it is
+ * already writing D: allocating D over A or B corrupts the result (observed
+ * on G13G), while accumulating in place (D over C) is the intended use.
+ */
+static bool
+can_kill_early(const agx_instr *I, unsigned s)
+{
+   if (I->op == AGX_OPCODE_SIMD_MATRIX_FMADD && s < 2)
+      return false;
+
+   return I->src[s].kill && !I->src[s].memory;
+}
+
 static void
 kill_source(struct ra_ctx *rctx, const agx_instr *I, unsigned s)
 {
@@ -1034,7 +1050,7 @@ try_kill_early_sources(struct ra_ctx *rctx, const agx_instr *I,
       return;
 
    for (unsigned s = first_source; s <= last_source; ++s) {
-      if (I->src[s].kill && !I->src[s].memory) {
+      if (can_kill_early(I, s)) {
          kill_source(rctx, I, s);
          rctx->early_killed = true;
          I->src[s].kill = false;
@@ -1132,7 +1148,7 @@ agx_ra_assign_local(struct ra_ctx *rctx)
          unsigned start = 0;
 
          agx_foreach_ssa_src(I, s) {
-            if (I->src[s].kill && !I->src[s].memory) {
+            if (can_kill_early(I, s)) {
                unsigned reg = rctx->ssa_to_reg[I->src[s].value];
 
                if (start == end || end != reg) {
