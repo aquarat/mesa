@@ -33,6 +33,7 @@ hk_files = files(
   'hk_image_view.h',
   'hk_instance.c',
   'hk_instance.h',
+  'hk_nir_lower_cooperative_matrix.c',
   'hk_nir_lower_descriptors.c',
   'hk_physical_device.c',
   'hk_physical_device.h',
