@@ -235,17 +235,18 @@ lower_cmat_instr(nir_builder *b, nir_instr *instr, struct lower_cmat_ctx *ctx)
       nir_def *b_mat = load_cmat_src(b, intr->src[2]);
       nir_def *acc = load_cmat_src(b, intr->src[3]);
 
-      /* Mixed f16 x f16 + f32: the hardware variant is selected by the
-       * accumulator size. Widen A and B elementwise (exact, same layout) and
-       * use the f32 instruction. HK_CMAT_MIXED=1 tries the raw mixed encoding
-       * instead (experiment: is it supported by the hardware?).
+      /* Mixed f16 x f16 + f32 is supported natively: the per-operand size
+       * flags are honoured and bit 26 (the fmadd32 variant) follows the
+       * accumulator, verified bit-exact on G13G. HK_CMAT_WIDEN=1 instead
+       * widens A and B to f32 elementwise (exact, same layout) and uses the
+       * all-f32 form, kept for experiments.
        */
       if (ab_bits != c_bits) {
-         static int mixed = -1;
-         if (mixed < 0)
-            mixed = debug_get_bool_option("HK_CMAT_MIXED", false);
+         static int widen = -1;
+         if (widen < 0)
+            widen = debug_get_bool_option("HK_CMAT_WIDEN", false);
 
-         if (!mixed) {
+         if (widen) {
             a = nir_f2f32(b, a);
             b_mat = nir_f2f32(b, b_mat);
          }
