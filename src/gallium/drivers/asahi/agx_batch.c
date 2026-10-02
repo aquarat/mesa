@@ -1076,6 +1076,8 @@ static const struct debug_named_value asahi_perf_options[] = {
     "Flush compute batches on buffer-only memory barriers (old behaviour)"},
    {"nooverlap", ASAHI_PERF_NOOVERLAP,
     "Full CDM barrier after every compute dispatch (old behaviour)"},
+   {"cpuread", ASAHI_PERF_CPUREAD,
+    "Read write-combined textures on the CPU, no staging blit (old behaviour)"},
    DEBUG_NAMED_VALUE_END,
 };
 

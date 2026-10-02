@@ -932,6 +932,36 @@ agx_transfer_map(struct pipe_context *pctx, struct pipe_resource *resource,
     */
    bool staging_blit = ail_is_level_logically_compressed(&rsrc->layout, level);
 
+   /* Reading a texture that lives in write-combined memory means uncached CPU
+    * loads: ~0.2 GB/s on G13G, so reading back one 24 MP RGBA32F image (what
+    * darktable does at the end of every export) took ~2 s. Let the GPU copy it
+    * into a linear write-back staging resource instead and read that. Small
+    * reads stay on the CPU, where the GPU round trip would cost more than the
+    * slow loads. ASAHI_PERFTEST=cpuread restores the old path.
+    */
+   if (!staging_blit && (usage & PIPE_MAP_READ) &&
+       (resource->target == PIPE_TEXTURE_2D ||
+        resource->target == PIPE_TEXTURE_RECT ||
+        resource->target == PIPE_TEXTURE_2D_ARRAY ||
+        resource->target == PIPE_TEXTURE_3D ||
+        resource->target == PIPE_TEXTURE_CUBE ||
+        resource->target == PIPE_TEXTURE_CUBE_ARRAY) &&
+       resource->nr_samples <= 1 &&
+       !util_format_is_depth_or_stencil(resource->format) &&
+       !(rsrc->bo->flags & AGX_BO_WRITEBACK) &&
+       !(usage & (PIPE_MAP_DIRECTLY | PIPE_MAP_PERSISTENT |
+                  PIPE_MAP_COHERENT | PIPE_MAP_UNSYNCHRONIZED)) &&
+       !(agx_perftest() & ASAHI_PERF_CPUREAD)) {
+
+      uint64_t bytes = (uint64_t)util_format_get_stride(rsrc->layout.format,
+                                                       box->width) *
+                       util_format_get_nblocksy(rsrc->layout.format,
+                                                box->height) *
+                       box->depth;
+
+      staging_blit = bytes >= AGX_STAGING_READ_MIN_BYTES;
+   }
+
    agx_prepare_for_map(ctx, rsrc, level, usage, box, staging_blit);
 
    /* Track the written buffer range */

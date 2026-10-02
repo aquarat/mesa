@@ -1118,7 +1118,13 @@ void agx_memory_barrier(struct pipe_context *pctx, unsigned flags);
 enum asahi_perftest {
    ASAHI_PERF_BARRIERFLUSH = BITFIELD_BIT(0),
    ASAHI_PERF_NOOVERLAP = BITFIELD_BIT(1),
+   ASAHI_PERF_CPUREAD = BITFIELD_BIT(2),
 };
+
+/* Texture reads at least this large from write-combined memory go through a
+ * GPU staging blit (agx_transfer_map).
+ */
+#define AGX_STAGING_READ_MIN_BYTES (64 * 1024)
 
 void agx_cdm_settle(struct agx_batch *batch);
 
