@@ -2995,6 +2995,42 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
    return agx_usc_addr(dev, t.gpu);
 }
 
+/*
+ * The weak barrier that follows an overlappable dispatch. A barrier block with
+ * only some cache bits: emitting no block at all is not an option (Honeykrisp
+ * found the stream needs one for sequencing). Bit 7 alone measured free on
+ * G13C/G13D (got-bringup data/barrier-bit-cost.md); AGX_CDM_BARRIER_MASK
+ * overrides it, as in Honeykrisp.
+ */
+static uint32_t
+agx_weak_barrier_mask(void)
+{
+   static uint32_t mask = ~0u;
+   if (unlikely(mask == ~0u)) {
+      const char *e = getenv("AGX_CDM_BARRIER_MASK");
+      mask = e ? (uint32_t)strtoul(e, NULL, 0) & 0x001FFFFFu : 0x80u;
+   }
+   return mask;
+}
+
+/*
+ * Emit the full barrier owed by overlapped dispatches, if any. Everything
+ * after it in the stream observes their writes.
+ */
+void
+agx_cdm_settle(struct agx_batch *batch)
+{
+   batch->ov_nr = batch->ov_nw = 0;
+
+   if (!batch->cdm_pending_flush)
+      return;
+
+   struct agx_device *dev = agx_device(batch->ctx->base.screen);
+   batch->cdm.current =
+      (void *)agx_cdm_barrier((uint32_t *)batch->cdm.current, dev->chip);
+   batch->cdm_pending_flush = false;
+}
+
 static void
 agx_launch_internal(struct agx_batch *batch, struct agx_grid grid,
                     struct agx_workgroup wg,
@@ -3004,23 +3040,43 @@ agx_launch_internal(struct agx_batch *batch, struct agx_grid grid,
    struct agx_context *ctx = batch->ctx;
    struct agx_device *dev = agx_device(ctx->base.screen);
 
+   /* Only agx_launch_grid sets this, after checking for hazards against the
+    * dispatches it may overlap. Everything else -- libagx helpers, blits,
+    * geometry/tessellation emulation -- has dependencies nobody declared, so
+    * it settles any owed barrier first and is followed by a full one.
+    */
+   bool weak = batch->cdm_weak_next;
+   batch->cdm_weak_next = false;
+
+   if (!weak)
+      agx_cdm_settle(batch);
+
    uint32_t *out = (uint32_t *)batch->cdm.current;
 
    out = agx_cdm_launch(out, dev->chip, grid, wg, launch, usc);
-   out = agx_cdm_barrier(out, dev->chip);
+
+   if (weak) {
+      *out = agx_weak_barrier_mask() | (3u /* CDM block type: barrier */ << 29);
+      out += AGX_CDM_BARRIER_LENGTH / 4;
+      batch->cdm_pending_flush = true;
+   } else {
+      out = agx_cdm_barrier(out, dev->chip);
+   }
 
    batch->cdm.current = (void *)out;
    assert(batch->cdm.current <= batch->cdm.end &&
           "Failed to reserve sufficient space in encoder");
 
    /* If the next dispatch might overflow, flush now. TODO: If this is ever hit
-    * in practice, we can use CDM stream links.
+    * in practice, we can use CDM stream links. Room for two barriers: the
+    * settle before a dispatch and the barrier after it, plus the settle before
+    * the stream terminates.
     */
    size_t dispatch_upper_bound =
       AGX_CDM_LAUNCH_WORD_0_LENGTH + AGX_CDM_LAUNCH_WORD_1_LENGTH +
       AGX_CDM_UNK_G14X_LENGTH + AGX_CDM_INDIRECT_LENGTH +
       AGX_CDM_GLOBAL_SIZE_LENGTH + AGX_CDM_LOCAL_SIZE_LENGTH +
-      AGX_CDM_BARRIER_LENGTH;
+      3 * AGX_CDM_BARRIER_LENGTH + AGX_CDM_STREAM_TERMINATE_LENGTH;
 
    if (batch->cdm.current + dispatch_upper_bound >= batch->cdm.end)
       agx_flush_batch_for_reason(ctx, batch, "CDM overfull");
@@ -5350,6 +5406,116 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
    agx_launch_internal(batch, grid, wg, launch, stage, usc);
 }
 
+static bool
+agx_ov_contains(const uint32_t *set, unsigned n, uint32_t handle)
+{
+   for (unsigned i = 0; i < n; ++i) {
+      if (set[i] == handle)
+         return true;
+   }
+
+   return false;
+}
+
+struct agx_ov_access {
+   uint32_t handle;
+   bool write;
+};
+
+static void
+agx_ov_add(struct agx_ov_access *acc, unsigned *n, unsigned max,
+           struct pipe_resource *prsrc, bool write)
+{
+   if (!prsrc)
+      return;
+
+   struct agx_resource *rsrc = agx_resource(prsrc);
+
+   if (*n < max)
+      acc[*n] = (struct agx_ov_access){rsrc->bo->handle, write};
+
+   (*n)++;
+
+   if (rsrc->separate_stencil) {
+      if (*n < max)
+         acc[*n] = (struct agx_ov_access){rsrc->separate_stencil->bo->handle,
+                                          write};
+      (*n)++;
+   }
+}
+
+/*
+ * Decide whether the dispatch about to be recorded may overlap the dispatches
+ * before it in this compute batch, settling the owed barrier first if it may
+ * not. Every buffer, image and texture the dispatch can reach is bound through
+ * the context -- OpenCL global buffers through set_global_binding, the rest
+ * through the stage bindings -- so this is the whole set, at BO granularity.
+ * Global buffers are counted as written: nothing below the frontend knows
+ * whether a kernel writes through a pointer.
+ */
+static bool
+agx_overlap_prepare(struct agx_batch *batch, struct agx_compiled_shader *cs)
+{
+   struct agx_context *ctx = batch->ctx;
+   struct agx_stage *st = &ctx->stage[MESA_SHADER_COMPUTE];
+
+   struct agx_ov_access acc[AGX_OVERLAP_MAX_BOS];
+   unsigned n = 0;
+   const unsigned max = ARRAY_SIZE(acc);
+
+   util_dynarray_foreach(&ctx->global_buffers, struct pipe_resource *, res)
+      agx_ov_add(acc, &n, max, *res, true);
+
+   u_foreach_bit(i, st->ssbo_mask) {
+      agx_ov_add(acc, &n, max, st->ssbo[i].buffer,
+                 st->ssbo_writable_mask & BITFIELD_BIT(i));
+   }
+
+   u_foreach_bit(i, st->image_mask) {
+      agx_ov_add(acc, &n, max, st->images[i].resource,
+                 st->images[i].shader_access & PIPE_IMAGE_ACCESS_WRITE);
+   }
+
+   for (unsigned i = 0; i < st->texture_count; ++i) {
+      if (st->textures[i])
+         agx_ov_add(acc, &n, max, st->textures[i]->base.texture, false);
+   }
+
+   u_foreach_bit(i, st->cb_mask)
+      agx_ov_add(acc, &n, max, st->cb[i].buffer, false);
+
+   /* Every compute dispatch shares one scratch allocation. */
+   if (cs->b.info.scratch_size || cs->b.info.preamble_scratch_size) {
+      if (n < max)
+         acc[n] = (struct agx_ov_access){0, true};
+      n++;
+   }
+
+   if (n > max) {
+      agx_cdm_settle(batch);
+      return false;
+   }
+
+   bool hazard = false;
+   for (unsigned i = 0; i < n && !hazard; ++i) {
+      hazard = agx_ov_contains(batch->ov_writes, batch->ov_nw, acc[i].handle) ||
+               (acc[i].write &&
+                agx_ov_contains(batch->ov_reads, batch->ov_nr, acc[i].handle));
+   }
+
+   if (hazard || batch->ov_nr + n > max || batch->ov_nw + n > max)
+      agx_cdm_settle(batch);
+
+   for (unsigned i = 0; i < n; ++i) {
+      if (acc[i].write)
+         batch->ov_writes[batch->ov_nw++] = acc[i].handle;
+      else
+         batch->ov_reads[batch->ov_nr++] = acc[i].handle;
+   }
+
+   return true;
+}
+
 static void
 agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
 {
@@ -5414,8 +5580,18 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
       }
    }
 
+   /* Indirect grids may have been written by an overlapping dispatch, and the
+    * blitter's dispatches belong to the driver, so neither overlaps.
+    */
+   if (!indirect && !ctx->compute_blitter.active && !statistic &&
+       !(agx_perftest() & ASAHI_PERF_NOOVERLAP) &&
+       !agx_is_shader_empty(&cs->b)) {
+      batch->cdm_weak_next = agx_overlap_prepare(batch, cs);
+   }
+
    agx_launch(batch, grid, wg, cs, NULL, MESA_SHADER_COMPUTE,
               info->variable_shared_mem);
+   batch->cdm_weak_next = false;
 
    /* TODO: Dirty tracking? */
    agx_dirty_all(ctx);

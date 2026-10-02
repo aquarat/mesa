@@ -1505,6 +1505,11 @@ static void
 agx_flush_compute(struct agx_context *ctx, struct agx_batch *batch,
                   struct drm_asahi_cmd_compute *cmdbuf)
 {
+   /* The full barrier owed by overlapped dispatches makes their writes
+    * visible to whatever runs after this stream.
+    */
+   agx_cdm_settle(batch);
+
    /* Finalize the encoder */
    agx_pack(batch->cdm.current, CDM_STREAM_TERMINATE, _)
       ;

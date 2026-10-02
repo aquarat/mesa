@@ -137,6 +137,9 @@ agx_batch_init(struct agx_context *ctx,
    batch->initialized = false;
    batch->draws = 0;
    batch->incoherent_writes = false;
+   batch->cdm_pending_flush = false;
+   batch->cdm_weak_next = false;
+   batch->ov_nr = batch->ov_nw = 0;
    agx_bo_unreference(dev, batch->sampler_heap.bo);
    batch->sampler_heap.bo = NULL;
    batch->sampler_heap.count = 0;
@@ -1068,19 +1071,59 @@ agx_add_timestamp_end_query(struct agx_context *ctx, struct agx_query *q)
    }
 }
 
+static const struct debug_named_value asahi_perf_options[] = {
+   {"barrierflush", ASAHI_PERF_BARRIERFLUSH,
+    "Flush compute batches on buffer-only memory barriers (old behaviour)"},
+   {"nooverlap", ASAHI_PERF_NOOVERLAP,
+    "Full CDM barrier after every compute dispatch (old behaviour)"},
+   DEBUG_NAMED_VALUE_END,
+};
+
+DEBUG_GET_ONCE_FLAGS_OPTION(asahi_perftest, "ASAHI_PERFTEST",
+                            asahi_perf_options, 0)
+
+unsigned
+agx_perftest(void)
+{
+   return debug_get_option_asahi_perftest();
+}
+
+/* Barrier bits that only concern buffer memory. */
+#define AGX_BUFFER_ONLY_BARRIERS                                               \
+   (PIPE_BARRIER_MAPPED_BUFFER | PIPE_BARRIER_SHADER_BUFFER |                 \
+    PIPE_BARRIER_UPDATE_BUFFER | PIPE_BARRIER_CONSTANT_BUFFER)
+
 /*
  * To implement a memory barrier conservatively, flush any batch that contains
- * an incoherent memory write (requiring a memory barrier to synchronize). This
- * could be further optimized.
+ * an incoherent memory write (requiring a memory barrier to synchronize).
+ *
+ * Exception: a buffer-only barrier against a compute batch. Every dispatch in
+ * a compute batch is already followed by a full CDM barrier
+ * (agx_launch_internal), which is what makes one dispatch's buffer writes
+ * visible to the next -- Honeykrisp relies on exactly that within a command
+ * buffer. Hazards against other batches are tracked per resource
+ * (agx_batch_reads/agx_batch_writes), and the host only observes results after
+ * a fence, which flushes. Flushing here bought nothing but one submission per
+ * kernel: Rusticl issues a buffer barrier after every launch, so each OpenCL
+ * kernel that wrote a buffer cost a full submit/control-stream round trip
+ * (~38 us on G13G). Image and texture barriers still flush, because nothing
+ * has yet measured whether the in-stream barrier covers the texture path.
+ *
+ * ASAHI_PERFTEST=barrierflush restores the old behaviour.
  */
 void
 agx_memory_barrier(struct pipe_context *pctx, unsigned flags)
 {
    struct agx_context *ctx = agx_context(pctx);
+   bool buffer_only = (flags & ~AGX_BUFFER_ONLY_BARRIERS) == 0 &&
+                      !(agx_perftest() & ASAHI_PERF_BARRIERFLUSH);
 
    unsigned i;
    foreach_active(ctx, i) {
       struct agx_batch *batch = &ctx->batches.slots[i];
+
+      if (buffer_only && agx_batch_is_compute(batch))
+         continue;
 
       if (batch->incoherent_writes)
          agx_flush_batch_for_reason(ctx, batch, "Memory barrier");

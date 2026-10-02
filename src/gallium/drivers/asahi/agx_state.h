@@ -356,6 +356,11 @@ struct agx_timestamps {
    uint64_t comp_end;
 };
 
+/* Buffers tracked per compute batch for dispatch overlap; more than this and
+ * the dispatch settles the barrier first. See agx_batch::cdm_pending_flush.
+ */
+#define AGX_OVERLAP_MAX_BOS (64)
+
 /* This is a firmware limit. It should be possible to raise to 2048 in the
  * future... still not good enough for VK though :-(
  */
@@ -431,6 +436,21 @@ struct agx_batch {
     * (e.g. image_write), needing a barrier later to access.
     */
    bool incoherent_writes;
+
+   /* Dispatch overlap (ASAHI_PERFTEST=nooverlap turns it off). A compute
+    * dispatch from launch_grid is followed by a weak CDM barrier instead of a
+    * full one, so independent dispatches can run concurrently. The full
+    * barrier is owed until settled: before any dispatch that touches a buffer
+    * an overlapping dispatch wrote (or writes one it read), before every
+    * driver-internal dispatch, and at the end of the control stream.
+    * ov_reads/ov_writes hold the BO handles touched since the last full
+    * barrier; handle 0 stands for the shared compute scratch buffer.
+    */
+   bool cdm_pending_flush;
+   bool cdm_weak_next;
+   uint8_t ov_nr, ov_nw;
+   uint32_t ov_reads[AGX_OVERLAP_MAX_BOS];
+   uint32_t ov_writes[AGX_OVERLAP_MAX_BOS];
 
    struct agx_pool pool, pipeline_pool;
 
@@ -1093,6 +1113,16 @@ void agx_sync_all(struct agx_context *ctx, const char *reason);
 void agx_sync_batch_for_reason(struct agx_context *ctx, struct agx_batch *batch,
                                const char *reason);
 void agx_memory_barrier(struct pipe_context *pctx, unsigned flags);
+
+/* ASAHI_PERFTEST: performance-affecting behaviour switches, for A/B tests. */
+enum asahi_perftest {
+   ASAHI_PERF_BARRIERFLUSH = BITFIELD_BIT(0),
+   ASAHI_PERF_NOOVERLAP = BITFIELD_BIT(1),
+};
+
+void agx_cdm_settle(struct agx_batch *batch);
+
+unsigned agx_perftest(void);
 
 /* Use these instead of batch_add_bo for proper resource tracking */
 void agx_batch_reads(struct agx_batch *batch, struct agx_resource *rsrc);
