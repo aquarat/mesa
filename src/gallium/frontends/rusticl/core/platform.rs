@@ -74,6 +74,7 @@ pub struct PlatformDebug {
     pub reuse_context: bool,
     pub sync_every_event: bool,
     pub validate_spirv: bool,
+    pub wc_buffers: bool,
 }
 
 pub struct PlatformFeatures {
@@ -110,6 +111,7 @@ static mut PLATFORM_DBG: PlatformDebug = PlatformDebug {
     reuse_context: true,
     sync_every_event: false,
     validate_spirv: false,
+    wc_buffers: false,
 };
 static mut PLATFORM_FEATURES: PlatformFeatures = PlatformFeatures {
     fp64: false,
@@ -133,6 +135,7 @@ fn load_env() {
                 "program" => debug.program = true,
                 "sync" => debug.sync_every_event = true,
                 "validate" => debug.validate_spirv = true,
+                "wc_buffers" => debug.wc_buffers = true,
                 "" => (),
                 _ => eprintln!("Unknown RUSTICL_DEBUG flag found: {}", flag),
             }

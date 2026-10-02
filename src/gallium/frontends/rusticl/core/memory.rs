@@ -811,6 +811,25 @@ fn sw_copy(
 }
 
 impl MemBase {
+    /// Whether the host is expected to read this buffer back, judged from the
+    /// flags the application gave: anything it declared it will not read
+    /// (HOST_WRITE_ONLY, HOST_NO_ACCESS) or that kernels only read (READ_ONLY,
+    /// i.e. an input the host fills) stays write-combined, which is twice as
+    /// fast for host writes; the rest -- kernel outputs, READ_WRITE (the
+    /// default), USE_HOST_PTR shadows -- is cached. Only on UMA devices, where
+    /// both live in the same memory. RUSTICL_DEBUG=wc_buffers turns it off.
+    fn host_may_read(context: &Context, flags: cl_mem_flags) -> bool {
+        if Platform::dbg().wc_buffers || !context.devs.iter().all(|d| d.unified_memory()) {
+            return false;
+        }
+
+        if bit_check(flags, CL_MEM_HOST_WRITE_ONLY | CL_MEM_HOST_NO_ACCESS) {
+            return false;
+        }
+
+        bit_check(flags, CL_MEM_HOST_READ_ONLY) || !bit_check(flags, CL_MEM_READ_ONLY)
+    }
+
     pub fn new_buffer(
         context: Arc<Context>,
         flags: cl_mem_flags,
@@ -847,6 +866,8 @@ impl MemBase {
                 ResourceType::Staging
             } else if bit_check(flags, CL_MEM_IMMUTABLE_EXT) {
                 ResourceType::Immutable
+            } else if Self::host_may_read(&context, flags) {
+                ResourceType::Cached
             } else {
                 ResourceType::Normal
             };

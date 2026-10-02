@@ -49,6 +49,11 @@ const LUID_SIZE: usize = PIPE_LUID_SIZE as usize;
 pub enum ResourceType {
     Immutable,
     Normal,
+    /// A device resource the host is expected to read back. On UMA drivers that
+    /// pick the CPU cache mode from PIPE_RESOURCE_FLAG_MAP_COHERENT (asahi),
+    /// this makes it write-back instead of write-combined: host reads of
+    /// write-combined memory are uncached and ran at ~0.25 GB/s on an M1.
+    Cached,
     Staging,
 }
 
@@ -61,6 +66,9 @@ impl ResourceType {
                 tmpl.bind |= PIPE_BIND_LINEAR;
             }
             Self::Normal => {}
+            Self::Cached => {
+                tmpl.flags |= PIPE_RESOURCE_FLAG_MAP_COHERENT;
+            }
             Self::Immutable => {
                 tmpl.set_usage(pipe_resource_usage::PIPE_USAGE_IMMUTABLE);
             }
