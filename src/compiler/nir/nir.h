@@ -7036,6 +7036,7 @@ bool nir_opt_licm(nir_shader *shader,
 bool nir_opt_loop(nir_shader *shader);
 
 bool nir_opt_loop_unroll(nir_shader *shader);
+bool nir_opt_loop_unroll_runtime(nir_shader *shader, unsigned max_cost);
 
 typedef enum {
    nir_move_const_undef =              BITFIELD_BIT(0),

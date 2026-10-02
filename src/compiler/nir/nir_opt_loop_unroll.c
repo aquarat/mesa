@@ -1205,3 +1205,370 @@ nir_opt_loop_unroll(nir_shader *shader)
    }
    return progress;
 }
+
+/*
+ * Runtime partial unrolling of simple counted loops.
+ *
+ * nir_opt_loop_unroll only unrolls completely, or partially with an exit
+ * check left after every copy. On a GPU where the loop back-edge and the
+ * exit check are the expensive part (AGX: a counted loop with four FMAs in
+ * its body runs at ~30% of FMA peak, ~85% unrolled 4x, and only ~37% with a
+ * check after each copy), neither helps a loop whose trip count is unknown or
+ * large. This pass turns
+ *
+ *    loop {
+ *       header                  (side-effect free, defines i)
+ *       if (!(i < lim)) break;
+ *       body                    (ends with i += step)
+ *    }
+ *
+ * into
+ *
+ *    loop {
+ *       header
+ *       if (!(i < lim) || lim - i <= (K - 1) * step) break;
+ *       body header body ... header body     (K bodies, no checks)
+ *    }
+ *    loop { the original loop, unchanged: the remainder }
+ *
+ * The main loop only enters an iteration when the next K iterations of the
+ * original loop are all known to run, so the K copies need no checks. Its
+ * header is re-executed by the remainder loop on exit, which is why the header
+ * must be free of side effects. Loop-carried state is lowered to registers
+ * first (as the other unroll paths here do), so it flows from the main loop
+ * into the remainder without any phi bookkeeping.
+ *
+ * Only innermost loops with a single terminator directly after a one-block
+ * header, a basic induction variable stepped by a positive constant, a
+ * loop-invariant bound and a signed or unsigned less-than compare qualify.
+ * Both resulting loops are marked dont_unroll so no later pass, and no later
+ * run of this one, unrolls them again.
+ */
+struct runtime_unroll_plan {
+   nir_loop *loop;
+   nir_loop_terminator *term;
+   nir_alu_instr *cond;
+   uint64_t step;
+   bool is_signed;
+   unsigned factor;
+   /* The bound, when it is a constant (which may live inside the loop). */
+   bool lim_is_const;
+   uint64_t lim_const;
+};
+
+static bool
+instr_is_pure_for_reexec(nir_instr *instr)
+{
+   switch (instr->type) {
+   case nir_instr_type_alu:
+   case nir_instr_type_load_const:
+   case nir_instr_type_undef:
+   case nir_instr_type_phi:
+      return true;
+   case nir_instr_type_intrinsic: {
+      nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+      return nir_intrinsic_infos[intr->intrinsic].flags &
+             NIR_INTRINSIC_CAN_ELIMINATE;
+   }
+   default:
+      return false;
+   }
+}
+
+static bool
+loop_contains_loop(nir_loop *loop)
+{
+   foreach_list_typed(nir_cf_node, node, node, &loop->body) {
+      if (node->type == nir_cf_node_loop)
+         return true;
+      if (node->type == nir_cf_node_if) {
+         nir_if *nif = nir_cf_node_as_if(node);
+         foreach_list_typed(nir_cf_node, n, node, &nif->then_list) {
+            if (n->type != nir_cf_node_block)
+               return true;
+         }
+         foreach_list_typed(nir_cf_node, n, node, &nif->else_list) {
+            if (n->type != nir_cf_node_block)
+               return true;
+         }
+      }
+   }
+   return false;
+}
+
+static bool
+plan_runtime_unroll(nir_loop *loop, unsigned max_cost,
+                    struct runtime_unroll_plan *p)
+{
+   nir_loop_info *li = loop->info;
+
+   if (loop->control != nir_loop_control_none || loop->partially_unrolled ||
+       nir_loop_has_continue_construct(loop))
+      return false;
+
+   /* Nested control flow below one level of ifs is left alone. A loop body
+    * with ifs containing only blocks is fine to clone.
+    */
+   if (loop_contains_loop(loop))
+      return false;
+
+   if (li->complex_loop || !list_is_singular(&li->loop_terminator_list))
+      return false;
+
+   nir_loop_terminator *t = list_first_entry(&li->loop_terminator_list,
+                                             nir_loop_terminator,
+                                             loop_terminator_link);
+
+   if (!nir_is_trivial_loop_if(t->nif, t->break_block))
+      return false;
+
+   /* The continue side of the terminator must be one empty block. */
+   nir_block *first_break, *first_continue;
+   get_first_blocks_in_terminator(t, &first_break, &first_continue);
+   if (first_continue != t->continue_from_block ||
+       !exec_list_is_empty(&first_continue->instr_list))
+      return false;
+
+   /* The header is the first block and nothing else, and it can be executed
+    * one extra time without changing anything.
+    */
+   nir_block *header = nir_loop_first_block(loop);
+   if (nir_cf_node_next(&header->cf_node) != &t->nif->cf_node)
+      return false;
+
+   nir_foreach_instr(instr, header) {
+      if (!instr_is_pure_for_reexec(instr))
+         return false;
+   }
+
+   /* The exit condition: break unless src0 < src1. */
+   if (t->conditional_instr->type != nir_instr_type_alu)
+      return false;
+
+   nir_alu_instr *cond = nir_instr_as_alu(t->conditional_instr);
+   if (t->nif->condition.ssa != &cond->def || cond->def.num_components != 1)
+      return false;
+
+   bool break_on_true = !t->continue_from_then;
+   bool is_lt = cond->op == nir_op_ilt || cond->op == nir_op_ult;
+   bool is_ge = cond->op == nir_op_ige || cond->op == nir_op_uge;
+   if (!(break_on_true ? is_ge : is_lt))
+      return false;
+
+   if (cond->src[0].swizzle[0] != 0 || cond->src[1].swizzle[0] != 0 ||
+       cond->src[0].src.ssa->num_components != 1 ||
+       cond->src[1].src.ssa->num_components != 1)
+      return false;
+
+   nir_def *iv = cond->src[0].src.ssa;
+   nir_def *lim = cond->src[1].src.ssa;
+
+   if (iv->bit_size != 32 && iv->bit_size != 64)
+      return false;
+
+   /* src0 must be the phi of a basic induction variable, i = i + step. */
+   if (!li->induction_vars)
+      return false;
+
+   struct hash_entry *he = _mesa_hash_table_search(li->induction_vars, iv);
+   if (!he)
+      return false;
+
+   nir_loop_induction_variable *var = he->data;
+   if (var->basis != iv || !var->def || !var->update_src ||
+       nir_def_instr(iv)->type != nir_instr_type_phi ||
+       nir_def_instr(iv)->block != header)
+      return false;
+
+   if (nir_def_instr(var->def)->type != nir_instr_type_alu)
+      return false;
+
+   nir_alu_instr *upd = nir_instr_as_alu(nir_def_instr(var->def));
+   if (upd->op != nir_op_iadd || upd->def.num_components != 1)
+      return false;
+
+   unsigned step_src = upd->src[0].src.ssa == iv ? 1 : 0;
+   if (upd->src[1 - step_src].src.ssa != iv ||
+       !nir_src_is_const(upd->src[step_src].src))
+      return false;
+
+   int64_t step = nir_src_comp_as_int(upd->src[step_src].src,
+                                      upd->src[step_src].swizzle[0]);
+   if (step <= 0 || step > (1 << 16))
+      return false;
+
+   /* The increment runs exactly once per iteration: it sits at the top level
+    * of the loop body, not inside an if, and feeds the phi's back edge.
+    */
+   if (upd->instr.block->cf_node.parent != &loop->cf_node)
+      return false;
+
+   nir_phi_instr *phi = nir_instr_as_phi(nir_def_instr(iv));
+   nir_foreach_phi_src(src, phi) {
+      if (src->pred == nir_loop_last_block(loop) && src->src.ssa != var->def)
+         return false;
+   }
+
+   /* The bound is a constant, or defined before the loop (blocks inside the
+    * loop come after the header in program order).
+    */
+   bool lim_is_const = nir_src_is_const(cond->src[1].src);
+   if (!lim_is_const && nir_def_instr(lim)->block->index >= header->index)
+      return false;
+
+   unsigned cost = li->instr_cost;
+   unsigned factor = cost <= max_cost / 4 ? 8 : cost <= max_cost / 2 ? 4 :
+                     cost <= max_cost ? 2 : 0;
+   if (factor < 2)
+      return false;
+
+   *p = (struct runtime_unroll_plan){
+      .loop = loop,
+      .term = t,
+      .cond = cond,
+      .step = (uint64_t)step,
+      .is_signed = cond->op == nir_op_ilt || cond->op == nir_op_ige,
+      .factor = factor,
+      .lim_is_const = lim_is_const,
+      .lim_const = lim_is_const ? nir_src_comp_as_uint(cond->src[1].src, 0)
+                                : 0,
+   };
+   return true;
+}
+
+static void
+runtime_unroll(nir_shader *shader, struct runtime_unroll_plan *p)
+{
+   nir_loop *loop = p->loop;
+   nir_loop_terminator *t = p->term;
+
+   loop_prepare_for_unroll(loop);
+
+   /* The phi is now a register load in the header; the compare still reads
+    * the induction variable and the bound.
+    */
+   nir_def *iv = p->cond->src[0].src.ssa;
+   nir_def *lim = p->cond->src[1].src.ssa;
+
+   nir_cf_list lp_header, lp_body;
+   nir_cf_extract(&lp_header, nir_before_block(nir_loop_first_block(loop)),
+                  nir_before_cf_node(&t->nif->cf_node));
+   nir_cf_extract(&lp_body, nir_after_cf_node(&t->nif->cf_node),
+                  nir_after_block(nir_loop_last_block(loop)));
+
+   nir_loop *main_loop =
+      nir_loop_create(nir_cf_node_get_function(&loop->cf_node));
+   nir_cf_node_insert(nir_before_cf_node(&loop->cf_node), &main_loop->cf_node);
+
+   struct hash_table *remap = _mesa_pointer_hash_table_create(NULL);
+
+   nir_cf_list_clone_and_reinsert(&lp_header, &main_loop->cf_node,
+                                  nir_after_cf_list(&main_loop->body), remap);
+
+   struct hash_entry *he = _mesa_hash_table_search(remap, iv);
+   assert(he && "the induction variable is defined in the header");
+   nir_def *i = he->data;
+
+   nir_builder b = nir_builder_at(nir_after_cf_list(&main_loop->body));
+   if (p->lim_is_const)
+      lim = nir_imm_intN_t(&b, p->lim_const, i->bit_size);
+
+   nir_def *done = p->is_signed ? nir_ige(&b, i, lim) : nir_uge(&b, i, lim);
+   nir_def *left = nir_isub(&b, lim, i);
+   nir_def *span =
+      nir_imm_intN_t(&b, (p->factor - 1) * p->step, i->bit_size);
+   nir_def *short_tail = nir_uge(&b, span, left);
+   nir_push_if(&b, nir_ior(&b, done, short_tail));
+   nir_jump(&b, nir_jump_break);
+   nir_pop_if(&b, NULL);
+
+   for (unsigned k = 0; k < p->factor; ++k) {
+      nir_cf_list_clone_and_reinsert(&lp_body, &main_loop->cf_node,
+                                     nir_after_cf_list(&main_loop->body),
+                                     remap);
+      if (k + 1 < p->factor) {
+         nir_cf_list_clone_and_reinsert(&lp_header, &main_loop->cf_node,
+                                        nir_after_cf_list(&main_loop->body),
+                                        remap);
+      }
+   }
+
+   /* Put the original loop back together: it is the remainder. */
+   nir_cf_reinsert(&lp_header, nir_before_cf_node(&t->nif->cf_node));
+   nir_cf_reinsert(&lp_body, nir_after_cf_node(&t->nif->cf_node));
+
+   main_loop->control = nir_loop_control_dont_unroll;
+   loop->control = nir_loop_control_dont_unroll;
+   main_loop->partially_unrolled = true;
+   loop->partially_unrolled = true;
+
+   _mesa_hash_table_destroy(remap, NULL);
+}
+
+static void
+collect_loops(struct exec_list *list, struct util_dynarray *loops)
+{
+   foreach_list_typed(nir_cf_node, node, node, list) {
+      if (node->type == nir_cf_node_if) {
+         nir_if *nif = nir_cf_node_as_if(node);
+         collect_loops(&nif->then_list, loops);
+         collect_loops(&nif->else_list, loops);
+      } else if (node->type == nir_cf_node_loop) {
+         nir_loop *loop = nir_cf_node_as_loop(node);
+         util_dynarray_append(loops, loop);
+         collect_loops(&loop->body, loops);
+      }
+   }
+}
+
+/**
+ * Partially unroll simple counted loops whose trip count is unknown or too
+ * large to unroll completely, by up to 8x, with a remainder loop. max_cost is
+ * the largest loop body (in nir_loop_info::instr_cost units) to unroll at
+ * all; bodies up to max_cost/4 get 8 copies, up to max_cost/2 four, the rest
+ * two.
+ */
+bool
+nir_opt_loop_unroll_runtime(nir_shader *shader, unsigned max_cost)
+{
+   bool progress = false;
+
+   nir_foreach_function_impl(impl, shader) {
+      nir_metadata_require(impl, nir_metadata_loop_analysis, 0, 0);
+      nir_metadata_require(impl, nir_metadata_block_index);
+
+      struct util_dynarray loops;
+      util_dynarray_init(&loops, NULL);
+      collect_loops(&impl->body, &loops);
+
+      /* Plan everything first: transforming one loop renumbers blocks, which
+       * the invariance check of the next one relies on.
+       */
+      struct util_dynarray plans;
+      util_dynarray_init(&plans, NULL);
+      util_dynarray_foreach(&loops, nir_loop *, loop) {
+         struct runtime_unroll_plan p;
+         if (plan_runtime_unroll(*loop, max_cost, &p))
+            util_dynarray_append(&plans, p);
+      }
+
+      util_dynarray_foreach(&plans, struct runtime_unroll_plan, p)
+         runtime_unroll(shader, p);
+
+      bool impl_progress = util_dynarray_num_elements(
+                              &plans, struct runtime_unroll_plan) > 0;
+
+      util_dynarray_fini(&plans);
+      util_dynarray_fini(&loops);
+
+      if (impl_progress) {
+         nir_progress(true, impl, nir_metadata_none);
+         nir_lower_reg_intrinsics_to_ssa_impl(impl);
+         progress = true;
+      } else {
+         nir_no_progress(impl);
+      }
+   }
+
+   return progress;
+}

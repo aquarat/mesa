@@ -48,6 +48,7 @@ static const struct debug_named_value agx_debug_options[] = {
    {"nosched",   AGX_DBG_NOSCHED,   "Do not schedule the shader"},
    {"spill",     AGX_DBG_SPILL,     "Spill (almost) everything"},
    {"nopromote", AGX_DBG_NOPROMOTE, "Do not promote constants to uniforms"},
+   {"nounroll",  AGX_DBG_NOUNROLL,  "Do not partially unroll counted loops"},
    DEBUG_NAMED_VALUE_END
 };
 /* clang-format on */
@@ -2905,6 +2906,22 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
    NIR_PASS(_, nir, nir_opt_shrink_stores, true);
 
    agx_optimize_loop_nir(nir);
+
+   /* Loop overhead is expensive on AGX: the while/jmp_exec_any pair around a
+    * small body costs more than the body (a counted loop of four FMAs runs at
+    * ~30% of FMA peak, ~85% unrolled 4x). Partially unroll counted loops with
+    * a remainder loop. Only small bodies: one of 32 FMAs already runs at ~92%
+    * and measured slower unrolled further. Compute only for now;
+    * AGX_MESA_DEBUG=nounroll disables.
+    */
+   if ((nir->info.stage == MESA_SHADER_COMPUTE ||
+        nir->info.stage == MESA_SHADER_KERNEL) &&
+       !(agx_get_compiler_debug() & AGX_DBG_NOUNROLL)) {
+      bool unrolled = false;
+      NIR_PASS(unrolled, nir, nir_opt_loop_unroll_runtime, 32);
+      if (unrolled)
+         agx_optimize_loop_nir(nir);
+   }
 
    /* If soft fault is enabled, we can freely speculate everything. That lets us
     * peephole select and form preambles more aggressively.
