@@ -608,11 +608,15 @@ agx_open_device(void *memctx, struct agx_device *dev)
    simple_mtx_init(&dev->bo_cache.lock, mtx_plain);
    list_inithead(&dev->bo_cache.lru);
 
-   /* 1/16 of RAM, between 256 MiB and 1 GiB. AGX_BO_CACHE_MB overrides. */
+   /* 1/8 of RAM, between 256 MiB and 2 GiB. AGX_BO_CACHE_MB overrides.
+    * 1/16 (1 GiB on 16 GB) was measured too tight: darktable re-allocates
+    * 371 MiB pipeline buffers, and returning them to the kernel each time
+    * took its export from 0.63 to 0.92 s.
+    */
    uint64_t ram = 0;
    os_get_total_physical_memory(&ram);
    dev->bo_cache.max_size =
-      CLAMP(ram / 16, 256ull << 20, 1024ull << 20);
+      CLAMP(ram / 8, 256ull << 20, 2048ull << 20);
    const char *bo_cache_mb = getenv("AGX_BO_CACHE_MB");
    if (bo_cache_mb)
       dev->bo_cache.max_size = (size_t)strtoull(bo_cache_mb, NULL, 0) << 20;

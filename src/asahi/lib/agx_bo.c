@@ -152,7 +152,7 @@ agx_bo_cache_put(struct agx_device *dev, struct agx_bo *bo)
 {
    if (bo->flags & AGX_BO_SHARED) {
       return false;
-   } else if (bo->size > dev->bo_cache.max_size / 4) {
+   } else if (bo->size > dev->bo_cache.max_size / 2) {
       /* Too big to be worth keeping: return it to the kernel now. */
       return false;
    } else {
