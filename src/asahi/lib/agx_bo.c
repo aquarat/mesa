@@ -131,6 +131,19 @@ agx_bo_cache_put_locked(struct agx_device *dev, struct agx_bo *bo)
 
    /* Let's do some cleanup in the BO cache while we hold the lock. */
    agx_bo_cache_evict_stale_bos(dev, time.tv_sec);
+
+   /* Then enforce the size cap, oldest first. Without it, a burst of large
+    * frees -- an OpenCL program reading back many big images through staging
+    * BOs, say -- parked gigabytes here for up to two seconds and ran a 16 GB
+    * machine out of memory.
+    */
+   while (dev->bo_cache.size > dev->bo_cache.max_size &&
+          !list_is_empty(&dev->bo_cache.lru)) {
+      struct agx_bo *oldest =
+         list_first_entry(&dev->bo_cache.lru, struct agx_bo, lru_link);
+      agx_bo_cache_remove_locked(dev, oldest);
+      agx_bo_free(dev, oldest);
+   }
 }
 
 /* Tries to add a BO to the cache. Returns if it was successful */
@@ -138,6 +151,9 @@ static bool
 agx_bo_cache_put(struct agx_device *dev, struct agx_bo *bo)
 {
    if (bo->flags & AGX_BO_SHARED) {
+      return false;
+   } else if (bo->size > dev->bo_cache.max_size / 4) {
+      /* Too big to be worth keeping: return it to the kernel now. */
       return false;
    } else {
       simple_mtx_lock(&dev->bo_cache.lock);

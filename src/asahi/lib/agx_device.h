@@ -159,6 +159,12 @@ struct agx_device {
       /* Current size of the BO cache in bytes (sum of sizes of cached BOs) */
       size_t size;
 
+      /* Upper bound on size. Cached BOs are pinned, unswappable memory that
+       * the OOM killer cannot attribute to any process, so an unbounded cache
+       * can take down the machine. See agx_bo_cache_put.
+       */
+      size_t max_size;
+
       /* Number of hits/misses for the BO cache */
       uint64_t hits, misses;
    } bo_cache;

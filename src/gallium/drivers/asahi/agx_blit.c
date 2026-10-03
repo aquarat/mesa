@@ -284,21 +284,36 @@ asahi_compute_restore(struct agx_context *ctx)
    struct pipe_context *pctx = &ctx->base;
    struct asahi_blitter *blitter = &ctx->compute_blitter;
 
+   /* Put back exactly what was bound. When nothing was, unbind the blit's
+    * own image: left bound, it kept the destination -- a staging resource
+    * the size of the whole transfer -- alive until the next image bind.
+    */
    if (blitter->has_saved_image) {
       pctx->set_shader_images(pctx, MESA_SHADER_COMPUTE, 0, 1, 0,
                               &blitter->saved_image);
       pipe_resource_reference(&blitter->saved_image.resource, NULL);
+   } else {
+      pctx->set_shader_images(pctx, MESA_SHADER_COMPUTE, 0, 0, 1, NULL);
    }
 
    /* take_ownership=true so do not unreference */
    pctx->set_constant_buffer(pctx, MESA_SHADER_COMPUTE, 0, &blitter->saved_cb);
    blitter->saved_cb.buffer = NULL;
 
+   /* set_sampler_views takes its own reference, so drop the one
+    * asahi_compute_save took. Merely clearing the pointer leaked the saved
+    * view, and through it the texture, on every compute blit made while a
+    * sampler view was bound -- in OpenCL, every image readback after a
+    * kernel that read an image (~0.77 GB per pass of the CTS imagedim
+    * sizes). With nothing saved, unbind the blit's source view instead of
+    * leaving it bound.
+    */
    if (blitter->saved_sampler_view) {
       pctx->set_sampler_views(pctx, MESA_SHADER_COMPUTE, 0, 1, 0,
                               &blitter->saved_sampler_view);
-
-      blitter->saved_sampler_view = NULL;
+      pipe_sampler_view_reference(&blitter->saved_sampler_view, NULL);
+   } else {
+      pctx->set_sampler_views(pctx, MESA_SHADER_COMPUTE, 0, 0, 1, NULL);
    }
 
    if (blitter->saved_num_sampler_states) {

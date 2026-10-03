@@ -11,6 +11,7 @@
 #include "drm-uapi/asahi_drm.h"
 #include "util/bitscan.h"
 #include "util/macros.h"
+#include "util/os_misc.h"
 #include "util/ralloc.h"
 #include "util/timespec.h"
 #include "agx_abi.h"
@@ -606,6 +607,15 @@ agx_open_device(void *memctx, struct agx_device *dev)
 
    simple_mtx_init(&dev->bo_cache.lock, mtx_plain);
    list_inithead(&dev->bo_cache.lru);
+
+   /* 1/16 of RAM, between 256 MiB and 1 GiB. AGX_BO_CACHE_MB overrides. */
+   uint64_t ram = 0;
+   os_get_total_physical_memory(&ram);
+   dev->bo_cache.max_size =
+      CLAMP(ram / 16, 256ull << 20, 1024ull << 20);
+   const char *bo_cache_mb = getenv("AGX_BO_CACHE_MB");
+   if (bo_cache_mb)
+      dev->bo_cache.max_size = (size_t)strtoull(bo_cache_mb, NULL, 0) << 20;
 
    for (unsigned i = 0; i < ARRAY_SIZE(dev->bo_cache.buckets); ++i)
       list_inithead(&dev->bo_cache.buckets[i]);

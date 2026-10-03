@@ -1007,6 +1007,13 @@ struct agx_transfer {
    struct {
       struct pipe_resource *rsrc;
       struct pipe_box box;
+
+      /* Blit format, when not agx_staging_format(): the uncompressed-read
+       * staging path copies texels as raw unsigned integers of the same size,
+       * which is bit-exact for every format (SNORM does not survive a float
+       * round trip, and util_format_snorm_to_sint misses the swizzled ones).
+       */
+      enum pipe_format format;
    } staging;
 };
 

@@ -798,6 +798,20 @@ agx_prepare_for_map(struct agx_context *ctx, struct agx_resource *rsrc,
  * non-depth/stencil formats, returns the format itself, except when that format
  * would not round-trip so we return a compatible roundtrippable format.
  */
+/* An unsigned integer format with the same texel size, or NONE. */
+static enum pipe_format
+agx_raw_format(enum pipe_format format)
+{
+   switch (util_format_get_blocksize(format)) {
+   case 1:  return PIPE_FORMAT_R8_UINT;
+   case 2:  return PIPE_FORMAT_R16_UINT;
+   case 4:  return PIPE_FORMAT_R32_UINT;
+   case 8:  return PIPE_FORMAT_R32G32_UINT;
+   case 16: return PIPE_FORMAT_R32G32B32A32_UINT;
+   default: return PIPE_FORMAT_NONE;
+   }
+}
+
 static enum pipe_format
 agx_staging_format(enum pipe_format format)
 {
@@ -875,7 +889,9 @@ agx_blit_from_staging(struct pipe_context *pctx, struct agx_transfer *trans)
    struct pipe_blit_info blit = {0};
 
    blit.dst.resource = dst;
-   blit.dst.format = agx_staging_format(agx_resource(dst)->layout.format);
+   blit.dst.format = trans->staging.format
+                        ? trans->staging.format
+                        : agx_staging_format(agx_resource(dst)->layout.format);
    blit.dst.level = trans->base.level;
    blit.dst.box = trans->base.box;
    blit.src.resource = trans->staging.rsrc;
@@ -895,7 +911,9 @@ agx_blit_to_staging(struct pipe_context *pctx, struct agx_transfer *trans)
    struct pipe_blit_info blit = {0};
 
    blit.src.resource = src;
-   blit.src.format = agx_staging_format(agx_resource(src)->layout.format);
+   blit.src.format = trans->staging.format
+                        ? trans->staging.format
+                        : agx_staging_format(agx_resource(src)->layout.format);
    blit.src.level = trans->base.level;
    blit.src.box = trans->base.box;
    blit.dst.resource = trans->staging.rsrc;
@@ -931,6 +949,7 @@ agx_transfer_map(struct pipe_context *pctx, struct pipe_resource *resource,
     * twiddled too, but we don't have a use case for that yet.
     */
    bool staging_blit = ail_is_level_logically_compressed(&rsrc->layout, level);
+   enum pipe_format raw_format = PIPE_FORMAT_NONE;
 
    /* Reading a texture that lives in write-combined memory means uncached CPU
     * loads: ~0.2 GB/s on G13G, so reading back one 24 MP RGBA32F image (what
@@ -940,12 +959,12 @@ agx_transfer_map(struct pipe_context *pctx, struct pipe_resource *resource,
     * slow loads. ASAHI_PERFTEST=cpuread restores the old path.
     */
    if (!staging_blit && (usage & PIPE_MAP_READ) &&
+       /* 2D only: 3D images read through the 2D-array staging view came back
+        * wrong for swizzled formats (CTS basic imagearraycopy3d, ARGB/ABGR
+        * SNORM_INT8), and arrays/cubes have not been validated.
+        */
        (resource->target == PIPE_TEXTURE_2D ||
-        resource->target == PIPE_TEXTURE_RECT ||
-        resource->target == PIPE_TEXTURE_2D_ARRAY ||
-        resource->target == PIPE_TEXTURE_3D ||
-        resource->target == PIPE_TEXTURE_CUBE ||
-        resource->target == PIPE_TEXTURE_CUBE_ARRAY) &&
+        resource->target == PIPE_TEXTURE_RECT) &&
        resource->nr_samples <= 1 &&
        !util_format_is_depth_or_stencil(resource->format) &&
        !(rsrc->bo->flags & AGX_BO_WRITEBACK) &&
@@ -959,7 +978,12 @@ agx_transfer_map(struct pipe_context *pctx, struct pipe_resource *resource,
                                                 box->height) *
                        box->depth;
 
-      staging_blit = bytes >= AGX_STAGING_READ_MIN_BYTES;
+      raw_format = agx_raw_format(rsrc->layout.format);
+      staging_blit = bytes >= AGX_STAGING_READ_MIN_BYTES &&
+                     raw_format != PIPE_FORMAT_NONE &&
+                     !util_format_is_compressed(rsrc->layout.format);
+      if (!staging_blit)
+         raw_format = PIPE_FORMAT_NONE;
    }
 
    agx_prepare_for_map(ctx, rsrc, level, usage, box, staging_blit);
@@ -997,6 +1021,7 @@ agx_transfer_map(struct pipe_context *pctx, struct pipe_resource *resource,
       transfer->base.stride = ail_get_linear_stride_B(&staging->layout, 0);
       transfer->base.layer_stride = staging->layout.layer_stride_B;
       transfer->staging.rsrc = &staging->base;
+      transfer->staging.format = raw_format;
 
       transfer->staging.box = *box;
       transfer->staging.box.x = 0;
