@@ -126,6 +126,8 @@ hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
 #define MIX(v) do { uint64_t _v = (v); for (int _i = 0; _i < 8; ++_i) { \
       h ^= (_v >> (8 * _i)) & 0xff; h *= 0x100000001b3ull; } } while (0)
    MIX(pdev->dev.debug);
+   /* Shader binary metadata now includes the buffer-only proof. */
+   MIX(1);
 
    /* AGX_MESA_DEBUG changes generated code -- nopreamble, noopt, nosched,
     * spill, nopromote and demand all do -- so it has to change the cache key.
@@ -1563,7 +1565,7 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
                   const struct vk_graphics_pipeline_state *state,
                   const struct vk_features *vk_features,
                   const VkAllocationCallbacks *pAllocator,
-                  struct hk_api_shader **shader_out)
+                  struct hk_api_shader **shader_out, bool buffer_only)
 {
    VkResult result;
    enum hk_feature_key features = hk_make_feature_key(vk_features);
@@ -1762,6 +1764,8 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
    } else {
       struct hk_shader *shader = hk_only_variant(obj);
 
+      shader->info.buffer_only = sw_stage == MESA_SHADER_COMPUTE && buffer_only;
+
       /* hk_compile_nir takes ownership of nir */
       result = hk_compile_nir(dev, pAllocator, nir, info->flags,
                               info->robustness, key, features, shader, sw_stage,
@@ -1809,6 +1813,44 @@ nir_opts(nir_shader *nir, void *data)
    } while (progress);
 }
 
+/* Pushed descriptor counts alone miss bindless accesses. Capture this proof
+ * before hk_lower_nir can turn image atomics or descriptor queries into plain
+ * global memory operations. Texel buffers are images/textures too. Inspect all
+ * functions, including preambles, and reject unfamiliar image intrinsics by
+ * name so new image operations fail conservatively rather than need an enum
+ * allowlist update. This metadata is serialized with hk_shader_info.
+ */
+static bool
+hk_nir_is_buffer_only(const nir_shader *nir)
+{
+   if (nir->info.stage != MESA_SHADER_COMPUTE || nir->info.num_textures ||
+       nir->info.num_images || BITSET_LAST_BIT(nir->info.textures_used) ||
+       BITSET_LAST_BIT(nir->info.samplers_used) ||
+       BITSET_LAST_BIT(nir->info.images_used) ||
+       BITSET_LAST_BIT(nir->info.texture_buffers) ||
+       BITSET_LAST_BIT(nir->info.image_buffers))
+      return false;
+
+   nir_foreach_function_with_impl(func, impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_tex)
+               return false;
+
+            if (instr->type == nir_instr_type_intrinsic) {
+               const char *name = nir_intrinsic_infos[
+                  nir_instr_as_intrinsic(instr)->intrinsic].name;
+               if (strstr(name, "image") || strstr(name, "texture") ||
+                   strstr(name, "sampler"))
+                  return false;
+            }
+         }
+      }
+   }
+
+   return true;
+}
+
 static VkResult
 hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
                    struct vk_shader_compile_info *infos,
@@ -1819,6 +1861,7 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
 {
    struct hk_device *dev = container_of(vk_dev, struct hk_device, vk);
    nir_shader *shaders[shader_count];
+   bool buffer_only[shader_count];
 
    /* Lower shaders, notably lowering I/O. This is a prerequisite for
     * intershader optimization.
@@ -1830,6 +1873,7 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
       enum hk_feature_key hk_features = hk_make_feature_key(features);
       nir_shader *nir = info->nir;
 
+      buffer_only[i] = hk_nir_is_buffer_only(nir);
       hk_lower_nir(dev, nir, info->robustness, is_multiview,
                    info->set_layout_count, info->set_layouts, hk_features);
 
@@ -1849,7 +1893,8 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
    for (uint32_t i = 0; i < shader_count; i++) {
       VkResult result =
          hk_compile_shader(dev, &infos[i], state, features, pAllocator,
-                           (struct hk_api_shader **)&shaders_out[i]);
+                           (struct hk_api_shader **)&shaders_out[i],
+                           buffer_only[i]);
       if (result != VK_SUCCESS) {
          /* Clean up all the shaders before this point */
          for (uint32_t j = 0; j < i; j++)

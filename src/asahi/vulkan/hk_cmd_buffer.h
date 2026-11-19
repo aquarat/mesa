@@ -363,6 +363,10 @@ struct hk_cs {
     * records that a flush is owed before anything may consume those writes.
     */
    bool pending_flush;
+   /* Work since the last full flush may have touched non-buffer caches. */
+   bool dep_needs_full;
+   /* A light dependency must be upgraded before an unproven consumer. */
+   bool dep_barrier_emitted;
    uint32_t weak_run;   /* dispatches since the last full flush */
 
    /* Which shader's dispatches this control stream holds, for GPU-time
@@ -397,6 +401,7 @@ struct hk_cs {
    /* Statistics */
    struct {
       uint32_t calls, cmds, flushes, merged;
+      uint32_t dep_barriers;
    } stats;
 
    /*
@@ -474,6 +479,7 @@ hk_cs_merge_cdm(struct hk_cs *a, const struct hk_cs *b)
    a->stats.calls += b->stats.calls;
    a->stats.cmds += b->stats.cmds;
    a->stats.flushes += b->stats.flushes;
+   a->stats.dep_barriers += b->stats.dep_barriers;
    a->stats.merged++;
 }
 
@@ -763,6 +769,7 @@ hk_cs_destroy(struct hk_cs *cs)
 
 void hk_dispatch_imm_writes(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
 void hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs);
+void hk_cdm_barrier_masked(struct hk_cs *cs, uint32_t mask);
 
 static void
 hk_cmd_buffer_end_compute_internal(struct hk_cmd_buffer *cmd,
@@ -943,18 +950,21 @@ void hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs);
  * stream: AGX_BARRIER_ALL emits a full (conservative) cache flush after the
  * launch, AGX_BARRIER_NONE emits none. The AGX_PREGFX/AGX_POSTGFX bits are
  * ignored here, they only pick the target control stream.
+ * buffer_only must prove direct application work with no image/texture access;
+ * internal callers pass false even for helpers that only access buffers.
  */
 void hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
                                  struct agx_cdm_launch_word_0_packed launch,
                                  uint32_t usc, struct agx_grid grid,
                                  struct agx_workgroup local_size,
-                                 enum agx_barrier barrier);
+                                 enum agx_barrier barrier, bool buffer_only);
 
 void hk_dispatch_with_usc(struct hk_device *dev, struct hk_cs *cs,
                           struct agx_shader_info *info, uint32_t usc,
                           struct agx_grid grid,
                           struct agx_workgroup local_size,
-                          enum agx_barrier barrier, enum hk_disp_kind kind);
+                          enum agx_barrier barrier, enum hk_disp_kind kind,
+                          bool buffer_only);
 
 static inline void
 hk_dispatch_with_local_size(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
@@ -970,7 +980,7 @@ hk_dispatch_with_local_size(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
    hk_reserve_scratch(cmd, cs, s);
    hk_dispatch_with_usc(dev, cs, &s->b.info, usc, grid, local_size, barrier,
-                        kind);
+                        kind, s->info.buffer_only);
 }
 
 void hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,

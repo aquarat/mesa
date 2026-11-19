@@ -109,6 +109,9 @@ struct hk_device {
    uint32_t overlap_max;
    bool overlap_max_valid;
 
+   /* HK_DEP_BARRIER_MASK, resolved at device creation (default 0x17f). */
+   uint32_t dep_barrier_mask;
+
    struct {
       struct u_rwlock lock;
       struct util_dynarray list;
@@ -153,6 +156,7 @@ enum hk_perftest {
    HK_PERF_XOVERLAP = BITFIELD_BIT(10),
    HK_PERF_NOXOVERLAP = BITFIELD_BIT(11),
    HK_PERF_NOCONSTDATA = BITFIELD_BIT(12),
+   HK_PERF_FULLBARRIER = BITFIELD_BIT(13),
 };
 
 #define HK_PERF(dev, flag) unlikely((dev)->perftest &HK_PERF_##flag)

@@ -1351,7 +1351,7 @@ hk_build_meta_shader_locked(struct hk_device *dev, struct hk_internal_key *key,
    hk_preprocess_nir_internal(dev->vk.physical, b.shader);
 
    struct hk_api_shader *s;
-   if (hk_compile_shader(dev, &info, NULL, NULL, NULL, &s) != VK_SUCCESS)
+   if (hk_compile_shader(dev, &info, NULL, NULL, NULL, &s, false) != VK_SUCCESS)
       return NULL;
 
    /* ..and cache it before we return. The key is on the stack right now, so
@@ -1520,7 +1520,7 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                                             vs->info.stage == MESA_SHADER_VERTEX
                                                ? gfx->linked[MESA_SHADER_VERTEX]
                                                : vs->only_linked),
-                        grid_vs, wg, AGX_BARRIER_ALL, HK_DISP_GS);
+                        grid_vs, wg, AGX_BARRIER_ALL, HK_DISP_GS, false);
 
    /* Transform feedback and various queries require extra dispatching,
     * determine if we need that here.
@@ -1665,7 +1665,7 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    hk_dispatch_with_usc(
       dev, cs, &vs->b.info,
       hk_upload_usc_words(cmd, vs, gfx->linked[MESA_SHADER_VERTEX]), grid_vs,
-      agx_workgroup(64, 1, 1), AGX_BARRIER_ALL, HK_DISP_TESS);
+      agx_workgroup(64, 1, 1), AGX_BARRIER_ALL, HK_DISP_TESS, false);
 
    /* The TCS grid is measured in threads (one per output control point), and we
     * pack as many whole patches into a workgroup as fit in a subgroup. The
@@ -1680,7 +1680,7 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       agx_workgroup(poly_tcs_workgroup_size(
                        tcs->info.tess.tcs_output_patch_size),
                     1, 1),
-      AGX_BARRIER_ALL, HK_DISP_TESS);
+      AGX_BARRIER_ALL, HK_DISP_TESS, false);
 
    /* First generate counts, then prefix sum them, and then tessellate. */
    libagx_tessellate(cmd, grid_tess, AGX_BARRIER_ALL | AGX_PREGFX, info.mode,
