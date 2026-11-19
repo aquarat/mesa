@@ -396,6 +396,45 @@ hk_barrier_servable_in_compute_stream(const VkDependencyInfo *info)
    return true;
 }
 
+static bool
+hk_stage_servable_by_dep_barrier(VkPipelineStageFlags2 stages, bool src)
+{
+   const VkPipelineStageFlags2 real =
+      VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_TRANSFER_BIT |
+      VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_CLEAR_BIT;
+   const VkPipelineStageFlags2 allowed =
+      real | (src ? VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT
+                  : VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT);
+
+   /* NONE is zero, and neither it nor a pipe endpoint is actual work. */
+   return (stages & real) != 0 && (stages & ~allowed) == 0;
+}
+
+static bool
+hk_barrier_servable_by_dep_barrier(const VkDependencyInfo *info)
+{
+   if (!info || info->imageMemoryBarrierCount ||
+       (!info->memoryBarrierCount && !info->bufferMemoryBarrierCount))
+      return false;
+
+   for (uint32_t i = 0; i < info->memoryBarrierCount; ++i) {
+      const VkMemoryBarrier2 *b = &info->pMemoryBarriers[i];
+      if (!hk_stage_servable_by_dep_barrier(b->srcStageMask, true) ||
+          !hk_stage_servable_by_dep_barrier(b->dstStageMask, false))
+         return false;
+   }
+
+   for (uint32_t i = 0; i < info->bufferMemoryBarrierCount; ++i) {
+      const VkBufferMemoryBarrier2 *b = &info->pBufferMemoryBarriers[i];
+      if (b->srcQueueFamilyIndex != b->dstQueueFamilyIndex ||
+          !hk_stage_servable_by_dep_barrier(b->srcStageMask, true) ||
+          !hk_stage_servable_by_dep_barrier(b->dstStageMask, false))
+         return false;
+   }
+
+   return true;
+}
+
 /*
  * Which subqueue does this stage mask name work on?
  *
@@ -478,10 +517,42 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
 
    bool compute_only = hk_barrier_servable_in_compute_stream(pDependencyInfo);
    bool gfx_open = cmd->current_cs.gfx != NULL;
+   struct hk_cs *cs = cmd->current_cs.cs;
+   bool dep_barrier = !HK_PERF(dev, FULLBARRIER) && !gfx_open && cs &&
+                      !cs->dep_needs_full &&
+                      hk_barrier_servable_by_dep_barrier(pDependencyInfo);
 
    hk_gputime_note_barrier(dev, compute_only, gfx_open,
                            cmd->current_cs.cs &&
-                              cmd->current_cs.cs->stats.cmds > 0);
+                              cmd->current_cs.cs->stats.cmds > 0,
+                           dep_barrier);
+
+   /* Buffer-only compute dependencies need wait-for-launch plus USC/L1
+    * maintenance, not PBE/texture maintenance. Independent M1 Max/M2 Ultra
+    * llama.cpp measurements found 0x17f correct; MR !44041's {5,6,8} plus
+    * bit 4 on G13X passed synchronization/memory_model/compute CTS and reduced
+    * M1 dependent dispatch cost from 7.1 to 4.0 us. Bit 8 is essential, as
+    * are bits 4-6 on G13X/G14X; USC invalidate alone corrupts results. Keep
+    * bits 0-3 too: removing them brought no measured gain. The costly bits
+    * 7,9-19 maintain PBE/texture caches, which these producers cannot touch.
+    *
+    * The light word flaked when applied to images/blits/GL indiscriminately.
+    * Here we require buffer/global barriers, narrow compute/transfer stages,
+    * no ownership transfer or open graphics stream, and only proven direct
+    * application buffer dispatches since the last full flush. Meta, indirect
+    * and image-capable work dirties that proof. The deferred full flush stays
+    * owed at stream end and before internal/indirect work, so this path does
+    * not substitute a light flush for their cache requirements. No new
+    * cross-subqueue dependency is created within this compute engine.
+    */
+   if (dep_barrier) {
+      hk_ensure_cs_has_space(cmd, cs, AGX_CDM_BARRIER_LENGTH);
+      hk_cdm_barrier_masked(cs, dev->dep_barrier_mask);
+      cs->dep_barrier_emitted = true;
+      cs->stats.dep_barriers++;
+      cs->weak_run = 0;
+      return;
+   }
 
    /* A compute->compute dependency does not need the stream torn down; a full
     * CDM barrier inside it orders the two sides just as well, and that is
@@ -996,7 +1067,7 @@ hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
 
    hk_dispatch_with_usc_launch(dev, cs, prog->b.launch,
                                agx_usc_addr(&dev->dev, t.gpu), grid,
-                               prog->b.workgroup, barrier);
+                               prog->b.workgroup, barrier, false);
 }
 
 void

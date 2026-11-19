@@ -61,7 +61,7 @@ hk_cmd_bind_compute_shader(struct hk_cmd_buffer *cmd,
  * only one genxml names; 0-20 are the rest. See hk_weak_barrier_mask() below
  * for the measured per-bit cost and why the default is what it is.
  */
-static void
+void
 hk_cdm_barrier_masked(struct hk_cs *cs, uint32_t mask)
 {
    assert(cs->type == HK_CS_CDM);
@@ -93,12 +93,11 @@ hk_weak_barrier_mask(struct hk_device *dev)
       /* 0x80 -- bit 7 alone.
        *
        * WHY THIS IS SAFE, rather than merely observed to work: two dispatches
-       * can only land in the same compute control stream if NOTHING separated
-       * them, because vkCmdPipelineBarrier2, vkCmdSetEvent2/WaitEvents2, every
-       * draw and every query operation all end the stream outright. Vulkan
-       * therefore guarantees that dispatches sharing a stream are independent,
-       * and independent dispatches need no coherency between them. The one
-       * exception is the driver's own dispatches -- geometry/tessellation
+       * need no coherency unless the application requests it. Pipeline
+       * barriers either end the stream or emit their own dependency barrier;
+       * events, draws and query operations retain their existing ordering.
+       * The weak post-dispatch word therefore need not serve dependencies.
+       * The exception is the driver's own dispatches -- geometry/tessellation
        * emulation, decompression, libagx helper kernels -- which DO have real
        * dependencies the application never expressed; every one of those still
        * passes AGX_BARRIER_ALL and gets the full flush, and the deferred flush
@@ -143,6 +142,8 @@ hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
           "caller must ensure space");
 
    cs->current = agx_cdm_barrier(cs->current, dev->dev.chip);
+   cs->dep_needs_full = false;
+   cs->dep_barrier_emitted = false;
    cs->stats.flushes++;
 }
 
@@ -150,20 +151,27 @@ void
 hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
                             struct agx_cdm_launch_word_0_packed launch,
                             uint32_t usc, struct agx_grid grid,
-                            struct agx_workgroup wg, enum agx_barrier barrier)
+                            struct agx_workgroup wg, enum agx_barrier barrier,
+                            bool buffer_only)
 {
    hk_ensure_cs_has_space(cs->cmd, cs, 0x2000 /* TODO */);
 
    /* Settle any deferred flush before a dispatch that is NOT overlappable.
     * Skipping the flush between two application dispatches is legal -- Vulkan
-    * orders them only through a barrier, which ends the stream. It is not legal
+    * orders them only through a barrier, served separately. It is not legal
     * to let the driver's own helper kernels, or an indirect dispatch reading a
     * GPU-written grid, observe writes that were never flushed. A garbage
     * indirect grid is not a wrong pixel, it is a dispatch of billions of
     * workgroups, which is how the blanket version hung the GPU.
     */
+   /* Meta vkCmdDispatch can also pass AGX_BARRIER_NONE. After a light
+    * dependency, settle the full flush before any unproven consumer (including
+    * image-capable application shaders), not just ALL/indirect launches. The
+    * extra condition is inactive on the legacy/fullbarrier path.
+    */
    if (unlikely(cs->pending_flush) &&
-       ((barrier & AGX_BARRIER_ALL) || agx_is_indirect(grid))) {
+       ((barrier & AGX_BARRIER_ALL) || agx_is_indirect(grid) ||
+        (cs->dep_barrier_emitted && !buffer_only))) {
       hk_cdm_cache_flush(dev, cs);
       cs->pending_flush = false;
       cs->weak_run = 0;
@@ -171,6 +179,12 @@ hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
    }
 
    cs->stats.cmds++;
+
+   /* Mark after settling the previous flush: that flush cannot clean the
+    * dispatch we are about to launch. Only proven direct application buffer
+    * work may leave the stream eligible for a light dependency barrier.
+    */
+   cs->dep_needs_full |= !buffer_only || agx_is_indirect(grid);
 
    cs->current =
       agx_cdm_launch(cs->current, dev->dev.chip, grid, wg, launch, usc);
@@ -231,7 +245,8 @@ void
 hk_dispatch_with_usc(struct hk_device *dev, struct hk_cs *cs,
                      struct agx_shader_info *info, uint32_t usc,
                      struct agx_grid grid, struct agx_workgroup local_size,
-                     enum agx_barrier barrier, enum hk_disp_kind kind)
+                     enum agx_barrier barrier, enum hk_disp_kind kind,
+                     bool buffer_only)
 {
    /* Every CDM launch in the driver reaches the chokepoint below through either
     * this function or hk_dispatch_precomp, and both are past their early
@@ -264,7 +279,11 @@ hk_dispatch_with_usc(struct hk_device *dev, struct hk_cs *cs,
       cfg.preshader_register_count = info->nr_preamble_gprs;
    }
 
-   hk_dispatch_with_usc_launch(dev, cs, launch, usc, grid, local_size, barrier);
+   buffer_only = buffer_only && kind == HK_DISP_APP &&
+                 !info->texture_state_count && !info->sampler_state_count &&
+                 !info->uses_sampler_heap;
+   hk_dispatch_with_usc_launch(dev, cs, launch, usc, grid, local_size, barrier,
+                              buffer_only);
 
    /* HK_GPUTIME_ISOLATE: give every dispatch its own control stream so the
     * firmware times it individually. Only the plain compute stream is split --
@@ -324,8 +343,8 @@ dispatch(struct hk_cmd_buffer *cmd, struct agx_grid grid)
     * compute -- and mislabelled as it.
     */
    /* Dispatches not separated by a barrier or event may run concurrently per
-    * Vulkan, and hk_CmdPipelineBarrier2 ends the control stream when ordering
-    * is actually requested -- so the per-dispatch flush is not what provides
+    * Vulkan, and hk_CmdPipelineBarrier2 handles ordering when it is actually
+    * requested -- so the per-dispatch flush is not what provides
     * that ordering, it only prevents overlap. See HK_PERF_OVERLAP.
     */
    struct hk_device *dev = hk_cmd_buffer_device(cmd);

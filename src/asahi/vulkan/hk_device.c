@@ -49,6 +49,7 @@ static const struct debug_named_value hk_perf_options[] = {
    {"overlap",      HK_PERF_OVERLAP,      "Let independent vkCmdDispatch calls overlap (default ON)"},
    {"nooverlap",    HK_PERF_NOOVERLAP,    "Disable dispatch overlap, restoring a full barrier after every dispatch"},
    {"csbarrier",    HK_PERF_CSBARRIER,    "Serve compute-only pipeline barriers with an in-stream CDM barrier instead of ending the control stream"},
+   {"fullbarrier",  HK_PERF_FULLBARRIER,  "Disable light buffer dependency barriers"},
    {"xoverlap",     HK_PERF_XOVERLAP,     "Let the render and compute subqueues overlap (default off: correct, but worth no frame rate here)"},
    {"noxoverlap",   HK_PERF_NOXOVERLAP,   "Explicitly disable subqueue overlap (already the default)"},
    {"noconstdata",  HK_PERF_NOCONSTDATA,  "Do not move constant tables out of per-invocation scratch (for ablation)"},
@@ -333,6 +334,9 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    }
 
    dev->perftest = debug_get_flags_option("HK_PERFTEST", hk_perf_options, 0);
+   const char *dep_mask = getenv("HK_DEP_BARRIER_MASK");
+   dev->dep_barrier_mask =
+      (dep_mask ? (uint32_t)strtoul(dep_mask, NULL, 0) : 0x17fu) & 0x001fffffu;
 
    /* Dispatch overlap is ON by default.
     *
@@ -479,7 +483,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       .robustness = &vk_robustness_disabled,
       .stage = MESA_SHADER_FRAGMENT,
    };
-   hk_compile_shader(dev, &info, NULL, NULL, pAllocator, &dev->null_fs);
+   hk_compile_shader(dev, &info, NULL, NULL, pAllocator, &dev->null_fs, false);
    if (!dev->null_fs) {
       result = VK_ERROR_OUT_OF_HOST_MEMORY;
       goto fail_meta;

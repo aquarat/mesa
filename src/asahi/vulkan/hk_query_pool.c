@@ -172,6 +172,8 @@ hk_queue_write(struct hk_cmd_buffer *cmd, uint64_t address, uint32_t value,
       }
 
       util_dynarray_append(&cs->imm_writes, imm);
+      /* Deferred query work is not covered by the buffer-dispatch proof. */
+      cs->dep_needs_full = true;
       return;
    }
 
@@ -408,6 +410,10 @@ hk_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
       libagx_copy_timestamp(cmd, agx_1d(1), AGX_BARRIER_ALL | AGX_POSTGFX,
                             report_addr, cs->timestamp.end.addr);
    } else {
+      /* Firmware query work is not an application buffer dispatch. */
+      if (cs->type == HK_CS_CDM)
+         cs->dep_needs_full = true;
+
       cs->timestamp.end = (struct agx_timestamp_req){
          .addr = report_addr,
          .handle = pool->handle,

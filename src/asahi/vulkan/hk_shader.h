@@ -63,6 +63,8 @@ hk_tess_info_merge(struct hk_tess_info a, struct hk_tess_info b)
 }
 
 struct hk_shader_info {
+   /* Proven before descriptor/image lowering; false for internal shaders. */
+   bool buffer_only;
    union {
       struct {
          uint32_t attribs_read;
@@ -373,7 +375,8 @@ VkResult hk_compile_shader(struct hk_device *dev,
                            const struct vk_graphics_pipeline_state *state,
                            const struct vk_features *features,
                            const VkAllocationCallbacks *pAllocator,
-                           struct hk_api_shader **shader_out);
+                           struct hk_api_shader **shader_out,
+                           bool buffer_only);
 
 void hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev,
                                 nir_shader *nir);

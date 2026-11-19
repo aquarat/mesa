@@ -221,6 +221,7 @@ struct hk_gputime {
     * HK_PERFTEST=csbarrier can remove.
     */
    uint64_t barriers_avoidable;
+   uint64_t barriers_dep; /* ...served by a light buffer dependency barrier */
 
    /* Commands submitted, and how many had to wait on the OTHER subqueue.
     * Cross-subqueue overlap is only possible for the ones that did not, so
@@ -291,7 +292,8 @@ void hk_gputime_note_precomp(struct hk_device *dev, unsigned prog,
 /* Classify one vkCmdPipelineBarrier2 for the report. `gfx_open` says whether a
  * graphics control stream was in progress, which alone forces the hammer. */
 void hk_gputime_note_barrier(struct hk_device *dev, bool compute_only,
-                             bool gfx_open, bool ends_real_work);
+                             bool gfx_open, bool ends_real_work,
+                             bool dep_barrier);
 
 /* One submitted hardware command: `compute` selects the subqueue, `crossed`
  * says whether it had to wait on the other one. */
