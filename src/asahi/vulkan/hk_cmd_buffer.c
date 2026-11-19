@@ -542,8 +542,8 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
     * application buffer dispatches since the last full flush. Meta, indirect
     * and image-capable work dirties that proof. The deferred full flush stays
     * owed at stream end and before internal/indirect work, so this path does
-    * not substitute a light flush for their cache requirements. No new
-    * cross-subqueue dependency is created within this compute engine.
+    * not substitute a light flush for their cache requirements. The barrier's
+    * cross-subqueue direction is still recorded, see below.
     */
    if (dep_barrier) {
       hk_ensure_cs_has_space(cmd, cs, AGX_CDM_BARRIER_LENGTH);
@@ -551,6 +551,22 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
       cs->dep_barrier_emitted = true;
       cs->stats.dep_barriers++;
       cs->weak_run = 0;
+
+      /* TRANSFER/COPY/CLEAR name work that hk may run on the graphics
+       * subqueue later (an image copy that needs graphics), so record the
+       * direction exactly as the stream-ending path below does. This only
+       * sets flags consumed by the next stream of the other type; it changes
+       * nothing unless HK_PERFTEST=xoverlap lets the subqueues overlap.
+       * (Review finding.)
+       */
+      const VkDependencyInfo *d = pDependencyInfo;
+      for (uint32_t i = 0; i < d->memoryBarrierCount; ++i)
+         hk_note_barrier_direction(cmd, d->pMemoryBarriers[i].srcStageMask,
+                                   d->pMemoryBarriers[i].dstStageMask);
+      for (uint32_t i = 0; i < d->bufferMemoryBarrierCount; ++i)
+         hk_note_barrier_direction(cmd,
+                                   d->pBufferMemoryBarriers[i].srcStageMask,
+                                   d->pBufferMemoryBarriers[i].dstStageMask);
       return;
    }
 
