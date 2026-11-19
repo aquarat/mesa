@@ -503,6 +503,36 @@ hk_note_barrier_direction(struct hk_cmd_buffer *cmd,
       cmd->cross_dep_pending[HK_CS_VDM] = true;
 }
 
+/*
+ * Could the first scope of this barrier include work that ran on the graphics
+ * subqueue? TRANSFER/COPY/CLEAR are ambiguous (an image copy may need
+ * graphics). The light path keeps the open compute stream, and a stream only
+ * takes a graphics->compute wait when it is created, so with
+ * HK_PERFTEST=xoverlap such a barrier must end the stream instead. Without
+ * xoverlap every compute command waits on prior graphics work anyway.
+ * (Review finding.)
+ */
+static bool
+hk_barrier_src_may_be_gfx(const VkDependencyInfo *info)
+{
+   bool gfx, comp;
+
+   for (uint32_t i = 0; i < info->memoryBarrierCount; ++i) {
+      hk_stage_subqueues(info->pMemoryBarriers[i].srcStageMask, &gfx, &comp);
+      if (gfx)
+         return true;
+   }
+
+   for (uint32_t i = 0; i < info->bufferMemoryBarrierCount; ++i) {
+      hk_stage_subqueues(info->pBufferMemoryBarriers[i].srcStageMask, &gfx,
+                         &comp);
+      if (gfx)
+         return true;
+   }
+
+   return false;
+}
+
 VKAPI_ATTR void VKAPI_CALL
 hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
                        const VkDependencyInfo *pDependencyInfo)
@@ -520,7 +550,9 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
    struct hk_cs *cs = cmd->current_cs.cs;
    bool dep_barrier = !HK_PERF(dev, FULLBARRIER) && !gfx_open && cs &&
                       !cs->dep_needs_full &&
-                      hk_barrier_servable_by_dep_barrier(pDependencyInfo);
+                      hk_barrier_servable_by_dep_barrier(pDependencyInfo) &&
+                      !(HK_PERF(dev, XOVERLAP) &&
+                        hk_barrier_src_may_be_gfx(pDependencyInfo));
 
    hk_gputime_note_barrier(dev, compute_only, gfx_open,
                            cmd->current_cs.cs &&
