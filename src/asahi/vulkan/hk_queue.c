@@ -931,9 +931,9 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
          if (cs->type == HK_CS_CDM) {
             perf_debug(
                cmdbuf,
-               "%u: Submitting CDM with %u API calls, %u dispatches, %u flushes, %u merged",
+               "%u: Submitting CDM with %u API calls, %u dispatches, %u flushes, %u dep barriers, %u merged",
                i, cs->stats.calls, cs->stats.cmds, cs->stats.flushes,
-               cs->stats.merged);
+               cs->stats.dep_barriers, cs->stats.merged);
 
             assert(cs->stats.cmds > 0 || cs->stats.flushes > 0 ||
                    cs->timestamp.end.handle);

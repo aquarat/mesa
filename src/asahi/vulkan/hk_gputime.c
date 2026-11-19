@@ -189,7 +189,7 @@ static_assert(ARRAY_SIZE(libagx_program_name) == LIBAGX_NUM_PROGRAMS,
 
 void
 hk_gputime_note_barrier(struct hk_device *dev, bool compute_only,
-                        bool gfx_open, bool ends_real_work)
+                        bool gfx_open, bool ends_real_work, bool dep_barrier)
 {
    struct hk_gputime *gt = &dev->gputime;
    if (!gt->enabled)
@@ -197,6 +197,7 @@ hk_gputime_note_barrier(struct hk_device *dev, bool compute_only,
 
    simple_mtx_lock(&gt->lock);
    gt->barriers++;
+   gt->barriers_dep += dep_barrier;
    if (compute_only) {
       if (gfx_open) {
          gt->barriers_gfx_open++;
@@ -731,7 +732,7 @@ hk_gputime_report(struct hk_device *dev, uint64_t now_ns)
               "[hk gputime]   pipeline barriers %llu (%.1f/frame): "
               "%llu compute-only (%.1f/frame ending real work), "
               "%llu compute-only but gfx open, "
-              "%llu need the hammer\n",
+              "%llu need the hammer, %llu light buffer dependencies\n",
               (unsigned long long)gt->barriers,
               gt->presents ? (double)gt->barriers / gt->presents : 0.0,
               (unsigned long long)gt->barriers_compute,
@@ -739,7 +740,8 @@ hk_gputime_report(struct hk_device *dev, uint64_t now_ns)
                            : 0.0,
               (unsigned long long)gt->barriers_gfx_open,
               (unsigned long long)(gt->barriers - gt->barriers_compute -
-                                   gt->barriers_gfx_open));
+                                   gt->barriers_gfx_open),
+              (unsigned long long)gt->barriers_dep);
    }
 
    double busy_ms = (busy / hz) * 1000.0;
@@ -784,6 +786,7 @@ hk_gputime_report(struct hk_device *dev, uint64_t now_ns)
    gt->barriers_compute = 0;
    gt->barriers_gfx_open = 0;
    gt->barriers_avoidable = 0;
+   gt->barriers_dep = 0;
    gt->cmds_submitted[0] = gt->cmds_submitted[1] = 0;
    gt->cmds_crossed[0] = gt->cmds_crossed[1] = 0;
    memset(gt->disp_kind, 0, sizeof(gt->disp_kind));
