@@ -329,6 +329,20 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
 
    int ret = dev->dev.ops.submit(&dev->dev, submit, &virt);
 
+   if (!ret && HK_PERF(dev, NOOWNBARRIER) && !dev->dev.is_virtio) {
+      /* Count the final headers, excluding waits restored by the last slice. */
+      const uint8_t *cmdbuf = (const void *)(uintptr_t)submit->cmdbuf;
+      unsigned dropped = 0;
+      for (uint32_t offs = 0; offs < submit->cmdbuf_size;) {
+         const struct drm_asahi_cmd_header *cmd = (const void *)(cmdbuf + offs);
+         if (cmd->cmd_type == DRM_ASAHI_CMD_COMPUTE &&
+             cmd->cdm_barrier == DRM_ASAHI_BARRIER_NONE)
+            dropped++;
+         offs += sizeof(*cmd) + cmd->size;
+      }
+      p_atomic_add(&dev->own_compute_barriers_dropped, dropped);
+   }
+
    if (dev->dev.is_virtio)
       u_rwlock_rdunlock(&dev->external_bos.lock);
 
@@ -915,6 +929,17 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
                                                     : (uint16_t)nr_vdm;
          uint16_t cdm_barrier = (!compute && !cross) ? DRM_ASAHI_BARRIER_NONE
                                                      : (uint16_t)nr_cdm;
+
+         /* Experiment: an in-order firmware compute queue may already enforce
+          * this own-queue wait. Not safe to enable by default until measured.
+          * Only the compute->compute (cdm) wait is dropped; the cross-subqueue
+          * vdm wait computed above is kept exactly as it is. In-sync and
+          * virtio submits keep today's behaviour.
+          */
+         if (HK_PERF(dev, NOOWNBARRIER) && compute &&
+             wait_count == 0 && !dev->dev.is_virtio &&
+             cdm_barrier != DRM_ASAHI_BARRIER_NONE)
+            cdm_barrier = DRM_ASAHI_BARRIER_NONE;
 
          hk_gputime_note_submit(dev, compute, cross);
 

@@ -728,6 +728,9 @@ hk_gputime_report(struct hk_device *dev, uint64_t now_ns)
               (unsigned long long)gt->cmds_crossed[1],
               (unsigned long long)gt->cmds_submitted[1]);
       fprintf(stderr,
+              "[hk gputime]   own-queue compute barriers dropped: %llu\n",
+              (unsigned long long)p_atomic_read(&dev->own_compute_barriers_dropped));
+      fprintf(stderr,
               "[hk gputime]   pipeline barriers %llu (%.1f/frame): "
               "%llu compute-only (%.1f/frame ending real work), "
               "%llu compute-only but gfx open, "

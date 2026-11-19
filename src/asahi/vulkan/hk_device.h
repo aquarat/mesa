@@ -100,6 +100,9 @@ struct hk_device {
 
    uint32_t perftest;
 
+   /* Atomic, cumulative count after ioctl slicing and barrier fixups. */
+   uint64_t own_compute_barriers_dropped;
+
    /* Firmware GPU timing, HK_GPUTIME=<seconds>. Off unless asked for. */
    struct hk_gputime gputime;
 
@@ -153,6 +156,7 @@ enum hk_perftest {
    HK_PERF_XOVERLAP = BITFIELD_BIT(10),
    HK_PERF_NOXOVERLAP = BITFIELD_BIT(11),
    HK_PERF_NOCONSTDATA = BITFIELD_BIT(12),
+   HK_PERF_NOOWNBARRIER = BITFIELD_BIT(13),
 };
 
 #define HK_PERF(dev, flag) unlikely((dev)->perftest &HK_PERF_##flag)

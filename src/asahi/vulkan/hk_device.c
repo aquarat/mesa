@@ -52,6 +52,7 @@ static const struct debug_named_value hk_perf_options[] = {
    {"xoverlap",     HK_PERF_XOVERLAP,     "Let the render and compute subqueues overlap (default off: correct, but worth no frame rate here)"},
    {"noxoverlap",   HK_PERF_NOXOVERLAP,   "Explicitly disable subqueue overlap (already the default)"},
    {"noconstdata",  HK_PERF_NOCONSTDATA,  "Do not move constant tables out of per-invocation scratch (for ablation)"},
+   {"noownbarrier", HK_PERF_NOOWNBARRIER, "EXPERIMENT: omit eligible own-queue compute waits to measure redundant firmware barrier overhead"},
    DEBUG_NAMED_VALUE_END
 };
 /* clang-format on */
