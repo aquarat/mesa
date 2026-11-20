@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="438" viewBox="0 0 760 438" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+<title id="t">llama.cpp throughput, Qwen3.6-35B-A3B (MoE, UD-Q5_K_XL)</title><desc id="d">Prompt processing pp512: system Mesa 217.6, 20e478a 271.0, coopmat-27 271.2 tokens per second. Decode tg128: system Mesa 25.5, 20e478a 29.7, coopmat-27 30.2 tokens per second.</desc>
+<rect width="760" height="438" rx="8" fill="#fcfcfb"/>
+<text x="20" y="30" font-size="17" font-weight="600" fill="#0b0b0b">llama.cpp throughput, Qwen3.6-35B-A3B (MoE, UD-Q5_K_XL)</text>
+<text x="20" y="52" font-size="13" fill="#52514e">llama-bench, flash attention on, all layers on the GPU; mean of interleaved runs</text>
+<rect x="20" y="68" width="12" height="12" rx="3" fill="#2a78d6"/>
+<text x="38" y="78.5" font-size="13" fill="#0b0b0b">System Mesa 26.2.6</text>
+<rect x="183.20000000000002" y="68" width="12" height="12" rx="3" fill="#eb6834"/>
+<text x="201.20000000000002" y="78.5" font-size="13" fill="#0b0b0b">mesa-coopmat 20e478a</text>
+<rect x="361.20000000000005" y="68" width="12" height="12" rx="3" fill="#1baf7a"/>
+<text x="379.20000000000005" y="78.5" font-size="13" fill="#0b0b0b">coopmat-27</text>
+<line x1="70.0" y1="340.0" x2="350.0" y2="340.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="62.0" y="344.0" font-size="12" text-anchor="end" fill="#898781">0</text>
+<line x1="70.0" y1="282.5" x2="350.0" y2="282.5" stroke="#e1e0d9" stroke-width="1"/>
+<text x="62.0" y="286.5" font-size="12" text-anchor="end" fill="#898781">100</text>
+<line x1="70.0" y1="225.0" x2="350.0" y2="225.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="62.0" y="229.0" font-size="12" text-anchor="end" fill="#898781">200</text>
+<line x1="70.0" y1="167.5" x2="350.0" y2="167.5" stroke="#e1e0d9" stroke-width="1"/>
+<text x="62.0" y="171.5" font-size="12" text-anchor="end" fill="#898781">300</text>
+<line x1="70.0" y1="110.0" x2="350.0" y2="110.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="62.0" y="114.0" font-size="12" text-anchor="end" fill="#898781">400</text>
+<line x1="70.0" y1="340" x2="350.0" y2="340" stroke="#c3c2b7" stroke-width="1"/>
+<path d="M139.0,340.0 V218.9 Q139.0,214.9 143.0,214.9 H181.0 Q185.0,214.9 185.0,218.9 V340.0 Z" fill="#2a78d6"><title>System Mesa 26.2.6, Prompt processing (pp512): 217.61 tokens/s</title></path>
+<text x="162.0" y="206.9" font-size="12" text-anchor="middle" fill="#0b0b0b">217.6</text>
+<path d="M187.0,340.0 V188.2 Q187.0,184.2 191.0,184.2 H229.0 Q233.0,184.2 233.0,188.2 V340.0 Z" fill="#eb6834"><title>mesa-coopmat 20e478a, Prompt processing (pp512): 270.98 tokens/s</title></path>
+<text x="210.0" y="176.2" font-size="12" text-anchor="middle" fill="#0b0b0b">271</text>
+<path d="M235.0,340.0 V188.1 Q235.0,184.1 239.0,184.1 H277.0 Q281.0,184.1 281.0,188.1 V340.0 Z" fill="#1baf7a"><title>coopmat-27, Prompt processing (pp512): 271.16 tokens/s</title></path>
+<text x="258.0" y="176.1" font-size="12" text-anchor="middle" fill="#0b0b0b">271.2</text>
+<text x="210.0" y="362" font-size="13" font-weight="600" text-anchor="middle" fill="#0b0b0b">Prompt processing (pp512)</text>
+<text x="210.0" y="380" font-size="12" text-anchor="middle" fill="#52514e">tokens/s</text>
+<line x1="430.0" y1="340.0" x2="710.0" y2="340.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="422.0" y="344.0" font-size="12" text-anchor="end" fill="#898781">0</text>
+<line x1="430.0" y1="282.5" x2="710.0" y2="282.5" stroke="#e1e0d9" stroke-width="1"/>
+<text x="422.0" y="286.5" font-size="12" text-anchor="end" fill="#898781">10</text>
+<line x1="430.0" y1="225.0" x2="710.0" y2="225.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="422.0" y="229.0" font-size="12" text-anchor="end" fill="#898781">20</text>
+<line x1="430.0" y1="167.5" x2="710.0" y2="167.5" stroke="#e1e0d9" stroke-width="1"/>
+<text x="422.0" y="171.5" font-size="12" text-anchor="end" fill="#898781">30</text>
+<line x1="430.0" y1="110.0" x2="710.0" y2="110.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="422.0" y="114.0" font-size="12" text-anchor="end" fill="#898781">40</text>
+<line x1="430.0" y1="340" x2="710.0" y2="340" stroke="#c3c2b7" stroke-width="1"/>
+<path d="M499.0,340.0 V197.7 Q499.0,193.7 503.0,193.7 H541.0 Q545.0,193.7 545.0,197.7 V340.0 Z" fill="#2a78d6"><title>System Mesa 26.2.6, Decode (tg128): 25.45 tokens/s</title></path>
+<text x="522.0" y="185.7" font-size="12" text-anchor="middle" fill="#0b0b0b">25.4</text>
+<path d="M547.0,340.0 V173.2 Q547.0,169.2 551.0,169.2 H589.0 Q593.0,169.2 593.0,173.2 V340.0 Z" fill="#eb6834"><title>mesa-coopmat 20e478a, Decode (tg128): 29.71 tokens/s</title></path>
+<text x="570.0" y="161.2" font-size="12" text-anchor="middle" fill="#0b0b0b">29.7</text>
+<path d="M595.0,340.0 V170.5 Q595.0,166.5 599.0,166.5 H637.0 Q641.0,166.5 641.0,170.5 V340.0 Z" fill="#1baf7a"><title>coopmat-27, Decode (tg128): 30.18 tokens/s</title></path>
+<text x="618.0" y="158.5" font-size="12" text-anchor="middle" fill="#0b0b0b">30.2</text>
+<text x="570.0" y="362" font-size="13" font-weight="600" text-anchor="middle" fill="#0b0b0b">Decode (tg128)</text>
+<text x="570.0" y="380" font-size="12" text-anchor="middle" fill="#52514e">tokens/s</text>
+<text x="20" y="410" font-size="11" fill="#898781">M1 Max Mac Studio (64 GB), Fedora Asahi Remix 44, Asahi 7.3 kernel, llama.cpp 9a080f44b (2026-11-19).</text>
+<text x="20" y="426" font-size="11" fill="#898781">20e478a and coopmat-27: two interleaved runs of 3 repetitions each; system Mesa: one run of 3.</text>
+</svg>

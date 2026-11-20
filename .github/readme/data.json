@@ -1,0 +1,44 @@
+{
+  "throughput": {
+    "kind": "grouped",
+    "title": "llama.cpp throughput, Qwen3.6-35B-A3B (MoE, UD-Q5_K_XL)",
+    "subtitle": "llama-bench, flash attention on, all layers on the GPU; mean of interleaved runs",
+    "desc": "Prompt processing pp512: system Mesa 217.6, 20e478a 271.0, coopmat-27 271.2 tokens per second. Decode tg128: system Mesa 25.5, 20e478a 29.7, coopmat-27 30.2 tokens per second.",
+    "series": ["System Mesa 26.2.6", "mesa-coopmat 20e478a", "coopmat-27"],
+    "panels": [
+      {"name": "Prompt processing (pp512)", "unit": "tokens/s", "values": [217.61, 270.98, 271.16]},
+      {"name": "Decode (tg128)", "unit": "tokens/s", "values": [25.45, 29.71, 30.18]}
+    ],
+    "note": "M1 Max Mac Studio (64 GB), Fedora Asahi Remix 44, Asahi 7.3 kernel, llama.cpp 9a080f44b (2026-11-19).\n20e478a and coopmat-27: two interleaved runs of 3 repetitions each; system Mesa: one run of 3."
+  },
+  "tbo": {
+    "kind": "hbar",
+    "title": "ggml test-backend-ops: failing cases (Vulkan vs CPU)",
+    "subtitle": "Lower is better. 0 means every case passed.",
+    "desc": "Failing cases: system Mesa 0 of 8848; 71969e3 682 of 8848; 20e478a 0 of 8848 and 0 of 23116; coopmat-27 0 of 12418 and 0 of 23116.",
+    "unit": "failing cases",
+    "rows": [
+      {"label": "System Mesa 26.2.6", "sub": "18-op sweep, 8,848 cases", "value": 0, "text": "0 of 8,848"},
+      {"label": "mesa-coopmat 71969e3", "sub": "18-op sweep, 8,848 cases", "value": 682, "text": "682 of 8,848"},
+      {"label": "mesa-coopmat 20e478a", "sub": "18-op sweep, 8,848 cases", "value": 0, "text": "0 of 8,848"},
+      {"label": "mesa-coopmat 20e478a", "sub": "full suite, 23,116 cases", "value": 0, "text": "0 of 23,116"},
+      {"label": "coopmat-27", "sub": "29-op sweep, 12,418 cases", "value": 0, "text": "0 of 12,418"},
+      {"label": "coopmat-27", "sub": "full suite, 23,116 cases", "value": 0, "text": "0 of 23,116"}
+    ],
+    "note": "71969e3 failed q5_0/q5_1 KV flash attention (674) and iq3_s GET_ROWS (8): a base predating upstream AGX fix bbeb2dca.\nSweeps: 18 and 29 ggml ops; full suite: llama.cpp 9a080f44b, coopmat-27 as built by the mesa-coopmat RPM."
+  },
+  "barrier": {
+    "kind": "hbar",
+    "title": "Cost of one dependent compute dispatch",
+    "subtitle": "Barrier plus drain between two dependent dispatches, 1-64 workgroups (whisker: range)",
+    "desc": "Full CDM barrier 4.05-4.25 microseconds, light barrier 0x17f 3.11-3.19, wait bit only 1.84-2.09 (not adopted), no barrier 0.13 (incorrect results).",
+    "unit": "microseconds per dependent dispatch",
+    "rows": [
+      {"label": "Full CDM barrier", "sub": "upstream, 20e478a", "value": 4.15, "lo": 4.05, "hi": 4.25, "color": 1, "text": "4.05-4.25 µs"},
+      {"label": "Light barrier 0x17f", "sub": "coopmat-27 default", "value": 3.15, "lo": 3.11, "hi": 3.19, "color": 2, "text": "3.11-3.19 µs"},
+      {"label": "Wait bit only (0x100)", "sub": "not adopted: breaks memory model", "value": 1.96, "lo": 1.84, "hi": 2.09, "text": "1.84-2.09 µs"},
+      {"label": "No barrier", "sub": "wrong results; lower bound", "value": 0.13, "text": "0.13 µs"}
+    ],
+    "note": "Microbenchmark on an M1 Max MacBook Pro, Asahi 7.1 kernel. Decode gain of the light barrier in llama.cpp: +1.2 to +2.6 %."
+  }
+}

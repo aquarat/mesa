@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="420" viewBox="0 0 760 420" role="img" aria-labelledby="t d" font-family="system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif">
+<title id="t">ggml test-backend-ops: failing cases (Vulkan vs CPU)</title><desc id="d">Failing cases: system Mesa 0 of 8848; 71969e3 682 of 8848; 20e478a 0 of 8848 and 0 of 23116; coopmat-27 0 of 12418 and 0 of 23116.</desc>
+<rect width="760" height="420" rx="8" fill="#fcfcfb"/>
+<text x="20" y="30" font-size="17" font-weight="600" fill="#0b0b0b">ggml test-backend-ops: failing cases (Vulkan vs CPU)</text>
+<text x="20" y="52" font-size="13" fill="#52514e">Lower is better. 0 means every case passed.</text>
+<line x1="250.0" y1="68" x2="250.0" y2="338" stroke="#e1e0d9" stroke-width="1"/>
+<text x="250.0" y="356" font-size="12" text-anchor="middle" fill="#898781">0</text>
+<line x1="340.0" y1="68" x2="340.0" y2="338" stroke="#e1e0d9" stroke-width="1"/>
+<text x="340.0" y="356" font-size="12" text-anchor="middle" fill="#898781">200</text>
+<line x1="430.0" y1="68" x2="430.0" y2="338" stroke="#e1e0d9" stroke-width="1"/>
+<text x="430.0" y="356" font-size="12" text-anchor="middle" fill="#898781">400</text>
+<line x1="520.0" y1="68" x2="520.0" y2="338" stroke="#e1e0d9" stroke-width="1"/>
+<text x="520.0" y="356" font-size="12" text-anchor="middle" fill="#898781">600</text>
+<line x1="610.0" y1="68" x2="610.0" y2="338" stroke="#e1e0d9" stroke-width="1"/>
+<text x="610.0" y="356" font-size="12" text-anchor="middle" fill="#898781">800</text>
+<text x="430.0" y="374" font-size="12" text-anchor="middle" fill="#52514e">failing cases</text>
+<text x="238" y="95.0" font-size="13" text-anchor="end" fill="#0b0b0b">System Mesa 26.2.6</text>
+<text x="238" y="111.0" font-size="11" text-anchor="end" fill="#52514e">18-op sweep, 8,848 cases</text>
+<text x="258.0" y="101.0" font-size="13" fill="#0b0b0b">0 of 8,848</text>
+<text x="238" y="139.0" font-size="13" text-anchor="end" fill="#0b0b0b">mesa-coopmat 71969e3</text>
+<text x="238" y="155.0" font-size="11" text-anchor="end" fill="#52514e">18-op sweep, 8,848 cases</text>
+<path d="M250.0,131.0 H552.9 Q556.9,131.0 556.9,135.0 V145.0 Q556.9,149.0 552.9,149.0 H250.0 Z" fill="#898781"><title>mesa-coopmat 71969e3: 682 of 8,848</title></path>
+<text x="564.9" y="145.0" font-size="13" fill="#0b0b0b">682 of 8,848</text>
+<text x="238" y="183.0" font-size="13" text-anchor="end" fill="#0b0b0b">mesa-coopmat 20e478a</text>
+<text x="238" y="199.0" font-size="11" text-anchor="end" fill="#52514e">18-op sweep, 8,848 cases</text>
+<text x="258.0" y="189.0" font-size="13" fill="#0b0b0b">0 of 8,848</text>
+<text x="238" y="227.0" font-size="13" text-anchor="end" fill="#0b0b0b">mesa-coopmat 20e478a</text>
+<text x="238" y="243.0" font-size="11" text-anchor="end" fill="#52514e">full suite, 23,116 cases</text>
+<text x="258.0" y="233.0" font-size="13" fill="#0b0b0b">0 of 23,116</text>
+<text x="238" y="271.0" font-size="13" text-anchor="end" fill="#0b0b0b">coopmat-27</text>
+<text x="238" y="287.0" font-size="11" text-anchor="end" fill="#52514e">29-op sweep, 12,418 cases</text>
+<text x="258.0" y="277.0" font-size="13" fill="#0b0b0b">0 of 12,418</text>
+<text x="238" y="315.0" font-size="13" text-anchor="end" fill="#0b0b0b">coopmat-27</text>
+<text x="238" y="331.0" font-size="11" text-anchor="end" fill="#52514e">full suite, 23,116 cases</text>
+<text x="258.0" y="321.0" font-size="13" fill="#0b0b0b">0 of 23,116</text>
+<line x1="250" y1="68" x2="250" y2="338" stroke="#c3c2b7" stroke-width="1"/>
+<text x="20" y="392" font-size="11" fill="#898781">71969e3 failed q5_0/q5_1 KV flash attention (674) and iq3_s GET_ROWS (8): a base predating upstream AGX fix bbeb2dca.</text>
+<text x="20" y="408" font-size="11" fill="#898781">Sweeps: 18 and 29 ggml ops; full suite: llama.cpp 9a080f44b, coopmat-27 as built by the mesa-coopmat RPM.</text>
+</svg>
